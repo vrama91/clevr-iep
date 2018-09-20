@@ -23,8 +23,13 @@ import h5py
 
 import iep.utils as utils
 import iep.preprocess
-from iep.data import ClevrDataset, ClevrDataLoader
-from iep.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel
+from iep.data import ClevrDataLoader
+from iep.models import ModuleNet
+from iep.models import Seq2Seq
+from iep.models import SeqModel
+from iep.models import LstmModel
+from iep.models import CnnLstmModel
+from iep.models import CnnLstmSaModel
 
 
 parser = argparse.ArgumentParser()
@@ -48,7 +53,7 @@ parser.add_argument('--shuffle_train_data', default=1, type=int)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
-        choices=['PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
+        choices=['Prior', 'PG', 'EE', 'PG+EE', 'LSTM', 'CNN+LSTM', 'CNN+LSTM+SA'])
 parser.add_argument('--train_program_generator', default=1, type=int)
 parser.add_argument('--train_execution_engine', default=1, type=int)
 parser.add_argument('--baseline_train_only_rnn', default=0, type=int)
@@ -135,6 +140,8 @@ def main(args):
     'question_families': question_families,
     'max_samples': args.num_train_samples,
     'num_workers': args.loader_num_workers,
+    'program_supervision_json': args.program_supervision_list,
+    'mixing_factor_supervision': args.mixing_factor_supervision,
   }
   val_loader_kwargs = {
     'question_h5': args.val_question_h5,
@@ -167,6 +174,12 @@ def train_loop(args, train_loader, val_loader):
   pg_best_state, ee_best_state, baseline_best_state = None, None, None
 
   # Set up model
+  if args.model_type == 'Prior':
+    program_prior, prior_kwargs = get_program_prior(args)
+    prior_optimizer = torch.optim.Adam(program_prior.parameters(),
+                                       lr=args.learning_rate)
+    print('Here is the program prior:')
+    print(program_prior)
   if args.model_type == 'PG' or args.model_type == 'PG+EE':
     program_generator, pg_kwargs = get_program_generator(args)
     pg_optimizer = torch.optim.Adam(program_generator.parameters(),
@@ -197,7 +210,7 @@ def train_loop(args, train_loader, val_loader):
   }
   t, epoch, reward_moving_average = 0, 0, 0
 
-  set_mode('train', [program_generator, execution_engine, baseline_model])
+  set_mode('train', [program_prior, program_generator, execution_engine, baseline_model])
 
   print('train_loader has %d samples' % len(train_loader.dataset))
   print('val_loader has %d samples' % len(val_loader.dataset))
@@ -215,7 +228,12 @@ def train_loop(args, train_loader, val_loader):
         programs_var = Variable(programs.cuda())
 
       reward = None
-      if args.model_type == 'PG':
+      if args.model_type == 'Prior':
+        prior_optimizer.zero_grad()
+        loss = program_prior(programs_var)
+        loss.backward()
+        prior_optimizer.step()
+      elif args.model_type == 'PG':
         # Train program generator with ground-truth programs
         pg_optimizer.zero_grad()
         loss = program_generator(questions_var, programs_var)
@@ -265,11 +283,11 @@ def train_loop(args, train_loader, val_loader):
 
       if t % args.checkpoint_every == 0:
         print('Checking training accuracy ... ')
-        train_acc = check_accuracy(args, program_generator, execution_engine,
+        train_acc = check_accuracy(args, program_prior, program_generator, execution_engine,
                                    baseline_model, train_loader)
         print('train accuracy is', train_acc)
         print('Checking validation accuracy ...')
-        val_acc = check_accuracy(args, program_generator, execution_engine,
+        val_acc = check_accuracy(args, program_prior, program_generator, execution_engine,
                                  baseline_model, val_loader)
         print('val accuracy is ', val_acc)
         stats['train_accs'].append(train_acc)
@@ -279,12 +297,15 @@ def train_loop(args, train_loader, val_loader):
         if val_acc > stats['best_val_acc']:
           stats['best_val_acc'] = val_acc
           stats['model_t'] = t
+          best_prior_state = get_state(program_prior)
           best_pg_state = get_state(program_generator)
           best_ee_state = get_state(execution_engine)
           best_baseline_state = get_state(baseline_model)
 
         checkpoint = {
           'args': args.__dict__,
+          'program_prior_kwargs': prior_kwargs,
+          'program_prior_state': best_prior_state,
           'program_generator_kwargs': pg_kwargs,
           'program_generator_state': best_pg_state,
           'execution_engine_kwargs': ee_kwargs,
@@ -298,6 +319,7 @@ def train_loop(args, train_loader, val_loader):
           checkpoint[k] = v
         print('Saving checkpoint to %s' % args.checkpoint_path)
         torch.save(checkpoint, args.checkpoint_path)
+        del checkpoint['program_prior_state']
         del checkpoint['program_generator_state']
         del checkpoint['execution_engine_state']
         del checkpoint['baseline_state']
@@ -319,6 +341,21 @@ def get_state(m):
   for k, v in m.state_dict().items():
     state[k] = v.clone()
   return state
+
+
+def get_program_prior(args);
+  vocab = utils.load_vocab(args.vocab_json)
+  kwargs = {
+      'decoder_vocab_size': len(vocab['program_token_to_idx']),
+      'wordvec_dim': args.rnn_wordvec_dim,
+      'hidden_dim': args.rnn_hidden_dim,
+      'rnn_num_layers': args.rnn_num_layers,
+      'rnn_dropout': args.rnn_dropout,
+  }
+  prior = SeqModel(**kwargs)
+  prior.cuda()
+  prior.train()
+  return prior, kwargs
 
 
 def get_program_generator(args):
@@ -441,8 +478,8 @@ def set_mode(mode, models):
     if mode == 'eval': m.eval()
 
 
-def check_accuracy(args, program_generator, execution_engine, baseline_model, loader):
-  set_mode('eval', [program_generator, execution_engine, baseline_model])
+def check_accuracy(args, program_prior, program_generator, execution_engine, baseline_model, loader):
+  set_mode('eval', [program_prior, program_generator, execution_engine, baseline_model])
   num_correct, num_samples = 0, 0
   for batch in loader:
     questions, _, feats, answers, programs, _ = batch
@@ -453,8 +490,16 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
     if programs[0] is not None:
       programs_var = Variable(programs.cuda(), volatile=True)
 
-    scores = None # Use this for everything but PG
-    if args.model_type == 'PG':
+    scores = None # Use this for everything but PG and Prior
+    num_correct=None # Use this for everything but Prior
+    logprob = None
+    if args.model_type == 'Prior':
+      logprob = 0.0
+      for i in range(programs.size(0)):
+        program_logprob = program_prior(Variable(programs[i:i+1].cuda(), volatile=True))
+        logprob += program_logprob
+        num_samples += 1
+    elif args.model_type == 'PG':
       vocab = utils.load_vocab(args.vocab_json)
       for i in range(questions.size(0)):
         program_pred = program_generator.sample(Variable(questions[i:i+1].cuda(), volatile=True))
@@ -480,8 +525,13 @@ def check_accuracy(args, program_generator, execution_engine, baseline_model, lo
     if num_samples >= args.num_val_samples:
       break
 
-  set_mode('train', [program_generator, execution_engine, baseline_model])
-  acc = float(num_correct) / num_samples
+  set_mode('train', [program_prior, program_generator, execution_engine, baseline_model])
+  if num_correct is not None:
+    acc = float(num_correct) / num_samples
+  elif logprob is not None:
+    acc = float(logprob)/num_samples
+  else:
+    raise RuntimeError
   return acc
 
 

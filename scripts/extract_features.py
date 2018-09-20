@@ -80,6 +80,8 @@ def main(args):
 
   model = build_model(args)
 
+  print('Built the model.')
+
   img_size = (args.image_height, args.image_width)
   with h5py.File(args.output_h5_file, 'w') as f:
     feat_dset = None

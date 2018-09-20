@@ -5,12 +5,13 @@
 #
 # This source code is licensed under the license found in the
 # LICENSE file in the root directory of this source tree.
-
+import json
 import numpy as np
 import h5py
 import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.dataloader import default_collate
+from torch.utils.data.sampler import WeightedRandomSampler
 
 import iep.programs
 
@@ -25,6 +26,7 @@ def _dataset_to_tensor(dset, mask=None):
 
 class ClevrDataset(Dataset):
   def __init__(self, question_h5, feature_h5, vocab, mode='prefix',
+               program_supervision_list=None,
                image_h5=None, max_samples=None, question_families=None,
                image_idx_start_from=None):
     mode_choices = ['prefix', 'postfix']
@@ -57,10 +59,21 @@ class ClevrDataset(Dataset):
       self.all_programs = _dataset_to_tensor(question_h5['programs'], mask)
     self.all_answers = _dataset_to_tensor(question_h5['answers'], mask)
 
+    if program_supervision_list is None:
+      self.all_supervision = torch.ones(self.all_questions.size(0)).float()
+    else:
+      self.all_supervision = torch.Tensor(program_supervision_list).float()
+
+    if program_supervision_list is not None and (
+        self.all_questions.size(0) != self.max_samples):
+      raise ValueError("Can supply either max_samples or program supervision "
+                       "list at same time not both.")
+
   def __getitem__(self, index):
     question = self.all_questions[index]
     image_idx = self.all_image_idxs[index]
     answer = self.all_answers[index]
+    supervision = self.all_supervision[index]
     program_seq = None
     if self.all_programs is not None:
       program_seq = self.all_programs[index]
@@ -86,7 +99,7 @@ class ClevrDataset(Dataset):
       elif self.mode == 'postfix':
         program_json = iep.programs.postfix_to_list(program_json_seq)
 
-    return (question, image, feats, answer, program_seq, program_json)
+    return (question, image, feats, answer, program_seq, program_json, supervision)
 
   def __len__(self):
     if self.max_samples is None:
@@ -122,12 +135,48 @@ class ClevrDataLoader(DataLoader):
     question_h5_path = kwargs.pop('question_h5')
     image_idx_start_from = kwargs.pop('image_idx_start_from', None)
     print('Reading questions from ', question_h5_path)
+
     with h5py.File(question_h5_path, 'r') as question_h5:
+      program_supervision_json = kwargs.pop('program_supervision_json', None)
+      if program_supervision_json is not None:
+        print('Reading program supervision file ', program_supervision_json)
+        with open(program_supervision_json) as f:
+          program_supervision_list = np.array(json.load(f))
+          if not isinstance(program_supervision_list, np.bool):
+            raise ValueError("Program supervision must be boolean.")
+      else:
+        program_supervision_list = None
+
       self.dataset = ClevrDataset(question_h5, self.feature_h5, vocab, mode,
+                                  program_supervision_list=program_supervision_list,
                                   image_h5=self.image_h5,
                                   max_samples=max_samples,
                                   question_families=question_families,
                                   image_idx_start_from=image_idx_start_from)
+      # Indicates which indicies in the dataset have associated supervision.
+      # Use the supervision values to set the weights for sampling datapoints.
+      supervision_dataset = self.dataset.all_supervision
+      supervision_yes = torch.sum(supervision_dataset == 1.0)
+      supervision_no = torch.sum(supervision_dataset == 0.0)
+      mixing_factor = kwargs.pop('mixing_factor_supervision', 1)
+      if mixing_factor > 1 or mixing_factor < 0:
+        raise ValueError("Mixing factor is bounded above by 1, below by 0.")
+      if supervision_no != 0:
+        weights_sampling_dataset = torch.new_zeros(supervision_dataset)
+        weights_sampling_dataset[
+            supervision_dataset == 1.0] = 1/supervision_yes
+        weights_sampling_dataset[
+            supervision_dataset == 0.0] = mixing_factor/supervision_no
+        weighted_random_sampler = WeightedRandomSampler(
+            weights=weights_sampling_dataset, num_samples=len(self.dataset),
+            replacement=True)
+        print('Using a weighted random sampler.')
+        kwargs['sampler'] = weighted_random_sampler
+        print('Forcing shuffle to be false as we are semi-supervised.')
+        kwargs['shuffle'] = False
+      elif supervision_yes == 0:
+        raise RuntimeError("Cannot work with 0 supervision.")
+
     kwargs['collate_fn'] = clevr_collate
     super(ClevrDataLoader, self).__init__(self.dataset, **kwargs)
 
@@ -158,4 +207,6 @@ def clevr_collate(batch):
   if transposed[4][0] is not None:
     program_seq_batch = default_collate(transposed[4])
   program_struct_batch = transposed[5]
-  return [question_batch, image_batch, feat_batch, answer_batch, program_seq_batch, program_struct_batch]
+  supervision_batch = transposed[6]
+  return [question_batch, image_batch, feat_batch, answer_batch,
+          program_seq_batch, program_struct_batch, supervision_batch]
