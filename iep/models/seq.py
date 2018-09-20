@@ -34,10 +34,9 @@ class SeqModel(nn.Module):
   ):
     super(SeqModel, self).__init__()
     self.decoder_embed = nn.Embedding(decoder_vocab_size, wordvec_dim)
-    self.decoder_rnn = nn.LSTM(wordvec_dim + hidden_dim, hidden_dim, rnn_num_layers,
+    self.decoder_rnn = nn.LSTM(wordvec_dim, hidden_dim, rnn_num_layers,
                                dropout=rnn_dropout, batch_first=True)
     self.decoder_linear = nn.Linear(hidden_dim, decoder_vocab_size)
-    self.DECODER_INIT = torch.Tensor(torch.randn(hidden_dim))
     self.NULL = null_token
     self.START = start_token
     self.END = end_token
@@ -72,16 +71,15 @@ class SeqModel(nn.Module):
     x[x.data == self.NULL] = replace
     return x, Variable(idx)
 
-  def decoder(self, decoder_init, y, h0=None, c0=None):
+  def decoder(self, y, h0=None, c0=None):
     _dims = self.get_dims(y=y)
 
     if _dims.T_out > 1:
       y, _ = self.before_rnn(y)
     y_embed = self.decoder_embed(y)
-    decoder_init_repeat = decoder_init.view(_dims.N, 1, _dims.H).expand(_dims.N, _dims.T_out, _dims.H)
-    rnn_input = torch.cat([decoder_init_repeat, y_embed], 2)
-    h0 = Variable(torch.zeros(_dims.L, _dims.N, _dims.H).type_as(decoder_init))
-    c0 = Variable(torch.zeros(_dims.L, _dims.N, _dims.H).type_as(decoder_init))
+    rnn_input = y_embed
+    h0 = Variable(torch.zeros(_dims.L, _dims.N, _dims.H).type_as(rnn_input.data))
+    c0 = Variable(torch.zeros(_dims.L, _dims.N, _dims.H).type_as(rnn_input.data))
     rnn_output, (ht, ct) = self.decoder_rnn(rnn_input, (h0, c0))
 
     rnn_output_2d = rnn_output.contiguous().view(_dims.N * _dims.T_out, _dims.H)
@@ -116,8 +114,6 @@ class SeqModel(nn.Module):
     return loss
 
   def forward(self, y):
-    _dims = self.get_dims(y=y)
-    decoder_init = self.DECODER_INIT.repeat(_dims.N, 1)
-    output_logprobs, _, _ = self.decoder(decoder_init, y)
+    output_logprobs, _, _ = self.decoder(y)
     loss = self.compute_loss(output_logprobs, y)
     return loss

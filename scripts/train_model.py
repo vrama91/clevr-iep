@@ -18,6 +18,7 @@ import torch
 torch.backends.cudnn.enabled = True
 from torch.autograd import Variable
 import torch.nn.functional as F
+import time
 import numpy as np
 import h5py
 
@@ -26,21 +27,23 @@ import iep.preprocess
 from iep.data import ClevrDataLoader
 from iep.models import ModuleNet
 from iep.models import Seq2Seq
-from iep.models import SeqModel
 from iep.models import LstmModel
 from iep.models import CnnLstmModel
 from iep.models import CnnLstmSaModel
-
+from iep.models.seq import SeqModel
 
 parser = argparse.ArgumentParser()
 
+# TODO(vrama): Change, make this an option, hacky.
+_TRAIN_DATA_DIR='/srv/share/datasets/clevr/CLEVR_v1.0/clevr-iep-data/'
+
 # Input data
-parser.add_argument('--train_question_h5', default='data/train_questions.h5')
-parser.add_argument('--train_features_h5', default='data/train_features.h5')
-parser.add_argument('--val_question_h5', default='data/val_questions.h5')
-parser.add_argument('--val_features_h5', default='data/val_features.h5')
+parser.add_argument('--train_question_h5', default=_TRAIN_DATA_DIR + 'train_questions.h5')
+parser.add_argument('--train_features_h5', default=_TRAIN_DATA_DIR + 'train_features.h5')
+parser.add_argument('--val_question_h5', default=_TRAIN_DATA_DIR + 'val_questions.h5')
+parser.add_argument('--val_features_h5', default=_TRAIN_DATA_DIR + 'val_features.h5')
 parser.add_argument('--feature_dim', default='1024,14,14')
-parser.add_argument('--vocab_json', default='data/vocab.json')
+parser.add_argument('--vocab_json', default=_TRAIN_DATA_DIR + 'vocab.json')
 
 parser.add_argument('--loader_num_workers', type=int, default=1)
 parser.add_argument('--use_local_copies', default=0, type=int)
@@ -50,6 +53,10 @@ parser.add_argument('--family_split_file', default=None)
 parser.add_argument('--num_train_samples', default=None, type=int)
 parser.add_argument('--num_val_samples', default=10000, type=int)
 parser.add_argument('--shuffle_train_data', default=1, type=int)
+
+parser.add_argument('--program_supervision_json', default=None,
+                    type=str)
+parser.add_argument('--mixing_factor_supervision', default=1.0)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
@@ -140,7 +147,7 @@ def main(args):
     'question_families': question_families,
     'max_samples': args.num_train_samples,
     'num_workers': args.loader_num_workers,
-    'program_supervision_json': args.program_supervision_list,
+    'program_supervision_json': args.program_supervision_json,
     'mixing_factor_supervision': args.mixing_factor_supervision,
   }
   val_loader_kwargs = {
@@ -218,9 +225,10 @@ def train_loop(args, train_loader, val_loader):
   while t < args.num_iterations:
     epoch += 1
     print('Starting epoch %d' % epoch)
+    stime = time.time()
     for batch in train_loader:
       t += 1
-      questions, _, feats, answers, programs, _ = batch
+      questions, _, feats, answers, programs, _, supervision_batch = batch
       questions_var = Variable(questions.cuda())
       feats_var = Variable(feats.cuda())
       answers_var = Variable(answers.cuda())
@@ -237,11 +245,17 @@ def train_loop(args, train_loader, val_loader):
         # Train program generator with ground-truth programs
         pg_optimizer.zero_grad()
         loss = program_generator(questions_var, programs_var)
+        # Add another component to the loss, which will be the elbo.
+        # Also add in multiplication with ground truth supervision values.
         loss.backward()
         pg_optimizer.step()
       elif args.model_type == 'EE':
         # Train execution engine with ground-truth programs
+        # TODO(vrama); Understand why the code here is inconsistent with the
+        # writing the paper.
         ee_optimizer.zero_grad()
+        # TODO(vrama): make changes where the programs being fed in actually
+        # come from inference.
         scores = execution_engine(feats_var, programs_var)
         loss = loss_fn(scores, answers_var)
         loss.backward()
@@ -259,6 +273,9 @@ def train_loop(args, train_loader, val_loader):
 
         loss = loss_fn(scores, answers_var)
         _, preds = scores.data.cpu().max(1)
+
+        # Will need to change the raw reward computation here to include
+        # the other stuff.
         raw_reward = (preds == answers).float()
         reward_moving_average *= args.reward_decay
         reward_moving_average += (1.0 - args.reward_decay) * raw_reward.mean()
@@ -275,7 +292,8 @@ def train_loop(args, train_loader, val_loader):
           pg_optimizer.step()
 
       if t % args.record_loss_every == 0:
-        print(t, loss.data[0])
+        print('Step: %d, loss: %f (%f Sec.)' % (
+                t, float(loss.data[0]), (time.time()-stime)/t))
         stats['train_losses'].append(loss.data[0])
         stats['train_losses_ts'].append(t)
         if reward is not None:
@@ -343,7 +361,7 @@ def get_state(m):
   return state
 
 
-def get_program_prior(args);
+def get_program_prior(args):
   vocab = utils.load_vocab(args.vocab_json)
   kwargs = {
       'decoder_vocab_size': len(vocab['program_token_to_idx']),
@@ -482,7 +500,7 @@ def check_accuracy(args, program_prior, program_generator, execution_engine, bas
   set_mode('eval', [program_prior, program_generator, execution_engine, baseline_model])
   num_correct, num_samples = 0, 0
   for batch in loader:
-    questions, _, feats, answers, programs, _ = batch
+    questions, _, feats, answers, programs, _, _ = batch
 
     questions_var = Variable(questions.cuda(), volatile=True)
     feats_var = Variable(feats.cuda(), volatile=True)
@@ -492,13 +510,12 @@ def check_accuracy(args, program_prior, program_generator, execution_engine, bas
 
     scores = None # Use this for everything but PG and Prior
     num_correct=None # Use this for everything but Prior
-    logprob = None
+    neg_logprob = None
     if args.model_type == 'Prior':
-      logprob = 0.0
+      neg_logprob = []
       for i in range(programs.size(0)):
-        program_logprob = program_prior(Variable(programs[i:i+1].cuda(), volatile=True))
-        logprob += program_logprob
-        num_samples += 1
+        program_neg_logprob = program_prior(Variable(programs[i:i+1].cuda(), volatile=True))
+        neg_logprob.append(float(program_neg_logprob.data.cpu().numpy()))
     elif args.model_type == 'PG':
       vocab = utils.load_vocab(args.vocab_json)
       for i in range(questions.size(0)):
@@ -528,8 +545,8 @@ def check_accuracy(args, program_prior, program_generator, execution_engine, bas
   set_mode('train', [program_prior, program_generator, execution_engine, baseline_model])
   if num_correct is not None:
     acc = float(num_correct) / num_samples
-  elif logprob is not None:
-    acc = float(logprob)/num_samples
+  elif neg_logprob is not None:
+    acc = -1 * np.mean(neg_logprob)
   else:
     raise RuntimeError
   return acc
