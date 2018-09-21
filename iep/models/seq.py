@@ -9,6 +9,7 @@
 """
 
 """
+from absl import logging
 import torch
 import torch.cuda
 import torch.nn as nn
@@ -17,6 +18,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from collections import namedtuple
 
+from iep.misc import sparse_softmax_cross_entropy_with_logits
 
 dims_collection = namedtuple('DimsCollection', ['V_out', 'D', 'H', 'L', 'N', 'T_out'])
 
@@ -83,23 +85,28 @@ class SeqModel(nn.Module):
     rnn_output, (ht, ct) = self.decoder_rnn(rnn_input, (h0, c0))
 
     rnn_output_2d = rnn_output.contiguous().view(_dims.N * _dims.T_out, _dims.H)
-    output_logprobs = self.decoder_linear(rnn_output_2d).view(_dims.N, _dims.T_out, _dims.V_out)
+    output_logits = self.decoder_linear(rnn_output_2d).view(_dims.N, _dims.T_out, _dims.V_out)
 
-    return output_logprobs, ht, ct
+    return output_logits, ht, ct
 
-  def compute_loss(self, output_logprobs, y):
+  def compute_loss(self, output_logits, y, crossent_reduction='mean'):
     """
     Compute loss. We assume that the first element of the output sequence y is
     a start token, and that each element of y is left-aligned and right-padded
-    with self.NULL out to T_out. We want the output_logprobs to predict the
+    with self.NULL out to T_out. We want the output_logits to predict the
     sequence y, shifted by one timestep so that y[0] is fed to the network and
     then y[1] is predicted. We also don't want to compute loss for padded
     timesteps.
 
     Inputs:
-    - output_logprobs: Variable of shape (N, T_out, V_out)
+    - output_logits: Variable of shape (N, T_out, V_out)
     - y: LongTensor Variable of shape (N, T_out)
     """
+    # NOTE(vrama): This version of computing the loss is conceptually buggy,
+    # the right log-prob of a sequence model would sum logprobs across timesteps
+    # and average across mutliple datapoints in the minitbatch.
+    logging.warn('Incorrect usage of log-prob in this implementation.')
+
     self.multinomial_outputs = None
     _dims = self.get_dims(y=y)
     mask = y.data != self.NULL
@@ -109,11 +116,47 @@ class SeqModel(nn.Module):
     out_mask = Variable(torch.Tensor(_dims.N, _dims.T_out).fill_(0).type_as(mask))
     out_mask[:, :-1] = mask[:, 1:]
     out_mask = out_mask.view(_dims.N, _dims.T_out, 1).expand(_dims.N, _dims.T_out, _dims.V_out)
-    out_masked = output_logprobs[out_mask].view(-1, _dims.V_out)
-    loss = F.cross_entropy(out_masked, y_masked)
+    out_masked = output_logits[out_mask].view(-1, _dims.V_out)
+    # Bug in Justin's code, seems like a very common mistake.
+    loss = sparse_softmax_cross_entropy_with_logits(
+        logits=out_masked, labels=y_masked, reduction=crossent_reduction)
+    print(torch.mean(loss))
+
     return loss
 
-  def forward(self, y):
-    output_logprobs, _, _ = self.decoder(y)
-    loss = self.compute_loss(output_logprobs, y)
-    return loss
+  def compute_loss_V2(self, output_logits, y):
+    """
+    Compute loss. We assume that the first element of the output sequence y is
+    a start token, and that each element of y is left-aligned and right-padded
+    with self.NULL out to T_out. We want the output_logits to predict the
+    sequence y, shifted by one timestep so that y[0] is fed to the network and
+    then y[1] is predicted. We also don't want to compute loss for padded
+    timesteps.
+
+    Inputs:
+    - output_logits: Variable of shape (N, T_out, V_out)
+    - y: LongTensor Variable of shape (N, T_out)
+    """
+    self.multinomial_outputs = None
+    _dims = self.get_dims(y=y)
+    mask = y.data != self.NULL
+
+    mask_use = Variable(mask[:, 1:].float())
+    y_use = y[:, 1:]
+    logits_use = output_logits[:, :-1, :]
+
+    loss = sparse_softmax_cross_entropy_with_logits(logits=logits_use,
+                                                    labels=y_use)
+    return torch.sum(loss*mask_use, dim=1)
+
+  def forward(self, y, crossent_reduction='mean'):
+    # TODO(vrama): Unify the code below between seq2seq.py and seq.py
+    output_logits, _, _ = self.decoder(y)
+    neg_logprobs = self.compute_loss_V2(output_logits, y)
+    if crossent_reduction == 'mean':
+      return torch.mean(neg_logprobs)
+    elif crossent_reduction is None:
+      return neg_logprobs
+    else:
+      raise NotImplementedError
+

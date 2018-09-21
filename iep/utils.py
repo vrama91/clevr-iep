@@ -9,6 +9,7 @@
 import json
 import torch
 
+
 from iep.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel
 
 
@@ -71,4 +72,3 @@ def load_baseline(path):
   model = model_cls_dict[baseline_type](**kwargs)
   model.load_state_dict(state)
   return model, kwargs
-
