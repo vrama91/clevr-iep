@@ -74,12 +74,12 @@ class ClevrDataset(Dataset):
     if program_supervision_list is None:
       self.all_supervision = torch.ones(self.all_questions.size(0)).float()
     else:
-      self.all_supervision = torch.Tensor(program_supervision_list).float()
+      self.all_supervision = torch.from_numpy(
+          program_supervision_list.astype(np.float32)).float()
 
     self.all_supervision = _filter_mask(self.all_supervision, mask)
 
-    if program_supervision_list is not None and (
-        self.all_questions.size(0) != self.max_samples):
+    if program_supervision_list is not None and self.max_samples is not None:
       raise ValueError("Can supply either max_samples or program supervision "
                        "list at same time not both.")
 
@@ -154,13 +154,13 @@ class ClevrDataLoader(DataLoader):
     print('Reading questions from ', question_h5_path)
 
     with h5py.File(question_h5_path, 'r') as question_h5:
-      program_supervision_json = kwargs.pop('program_supervision_json', None)
-      if program_supervision_json is not None:
-        print('Reading program supervision file ', program_supervision_json)
-        with open(program_supervision_json) as f:
-          program_supervision_list = np.array(json.load(f))
-          if not isinstance(program_supervision_list, np.bool):
-            raise ValueError("Program supervision must be boolean.")
+      program_supervision_npy = kwargs.pop('program_supervision_npy', None)
+      if program_supervision_npy is not None:
+        print('Reading program supervision file ', program_supervision_npy)
+        program_supervision_list = np.load(program_supervision_npy)
+        # TODO(vrama): Find a better way to do this.
+        if 'bool' not in str(program_supervision_list.dtype):
+          raise ValueError("Program supervision must be boolean.")
       else:
         program_supervision_list = None
 
@@ -180,11 +180,11 @@ class ClevrDataLoader(DataLoader):
       if mixing_factor > 1 or mixing_factor < 0:
         raise ValueError("Mixing factor is bounded above by 1, below by 0.")
       if supervision_no != 0:
-        weights_sampling_dataset = torch.new_zeros(supervision_dataset)
+        weights_sampling_dataset = torch.zeros(supervision_dataset.size()).double()
         weights_sampling_dataset[
-            supervision_dataset == 1.0] = 1/supervision_yes
+            supervision_dataset == 1.0] = mixing_factor/supervision_yes
         weights_sampling_dataset[
-            supervision_dataset == 0.0] = mixing_factor/supervision_no
+            supervision_dataset == 0.0] = 1/supervision_no
         weighted_random_sampler = WeightedRandomSampler(
             weights=weights_sampling_dataset, num_samples=len(self.dataset),
             replacement=True)

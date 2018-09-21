@@ -46,7 +46,7 @@ parser.add_argument('--val_question_h5', default=_TRAIN_DATA_DIR + 'val_question
 parser.add_argument('--val_features_h5', default=_TRAIN_DATA_DIR + 'val_features.h5')
 parser.add_argument('--feature_dim', default='1024,14,14')
 parser.add_argument('--vocab_json', default=_TRAIN_DATA_DIR + 'vocab.json')
-parser.add_argument('--load_train_features_memory', default=0)
+parser.add_argument('--load_train_features_memory', default=False, action='store_true')
 
 parser.add_argument('--loader_num_workers', type=int, default=1)
 parser.add_argument('--use_local_copies', default=0, type=int)
@@ -57,9 +57,9 @@ parser.add_argument('--num_train_samples', default=None, type=int)
 parser.add_argument('--num_val_samples', default=10000, type=int)
 parser.add_argument('--shuffle_train_data', default=1, type=int)
 
-parser.add_argument('--program_supervision_json', default=None,
+parser.add_argument('--program_supervision_npy', default=None,
                     type=str)
-parser.add_argument('--mixing_factor_supervision', default=1.0)
+parser.add_argument('--mixing_factor_supervision', default=1.0, type=float)
 
 # What type of model to use and which parts to train
 parser.add_argument('--model_type', default='PG',
@@ -150,7 +150,7 @@ def main(args):
     'question_families': question_families,
     'max_samples': args.num_train_samples,
     'num_workers': args.loader_num_workers,
-    'program_supervision_json': args.program_supervision_json,
+    'program_supervision_npy': args.program_supervision_npy,
     'mixing_factor_supervision': args.mixing_factor_supervision,
     'load_features': args.load_train_features_memory,
   }
@@ -227,7 +227,6 @@ def train_loop(args, train_loader, val_loader):
   t, epoch, reward_moving_average = 0, 0, 0
 
   set_mode('train', [program_prior, program_generator, execution_engine, baseline_model])
-
   print('train_loader has %d samples' % len(train_loader.dataset))
   print('val_loader has %d samples' % len(val_loader.dataset))
 
@@ -304,10 +303,13 @@ def train_loop(args, train_loader, val_loader):
 
       writer.add_scalar('data/train_loss', loss.data[0], t)
       writer.add_scalar('runtime/steps_per_sec', (time.time()-stime)/t-1)
+      writer.add_scalar('data/supervision',
+                        torch.sum(supervision_batch)/args.batch_size, t)
 
       if t % args.record_loss_every == 0 and t != 1:
-        print('Step: %d, loss: %f (%f Steps/Sec.)' % (
-                t, float(loss.data[0]), (time.time()-stime)/t-1))
+        print('Step: %d, loss: %f (%f Sec./step) [%f supervision]' % (
+                t, float(loss.data[0]), (time.time()-stime)/t-1,
+            torch.sum(supervision_batch)/args.batch_size))
         stats['train_losses'].append(loss.data[0])
         stats['train_losses_ts'].append(t)
         if reward is not None:
@@ -335,29 +337,29 @@ def train_loop(args, train_loader, val_loader):
           best_ee_state = get_state(execution_engine)
           best_baseline_state = get_state(baseline_model)
 
-        checkpoint = {
-          'args': args.__dict__,
-          'program_prior_kwargs': prior_kwargs,
-          'program_prior_state': best_prior_state,
-          'program_generator_kwargs': pg_kwargs,
-          'program_generator_state': best_pg_state,
-          'execution_engine_kwargs': ee_kwargs,
-          'execution_engine_state': best_ee_state,
-          'baseline_kwargs': baseline_kwargs,
-          'baseline_state': best_baseline_state,
-          'baseline_type': baseline_type,
-          'vocab': vocab
-        }
-        for k, v in stats.items():
-          checkpoint[k] = v
-        print('Saving checkpoint to %s' % args.checkpoint_path)
-        torch.save(checkpoint, args.checkpoint_path)
-        del checkpoint['program_prior_state']
-        del checkpoint['program_generator_state']
-        del checkpoint['execution_engine_state']
-        del checkpoint['baseline_state']
-        with open(args.checkpoint_path + '.json', 'w') as f:
-          json.dump(checkpoint, f)
+          checkpoint = {
+            'args': args.__dict__,
+            'program_prior_kwargs': prior_kwargs,
+            'program_prior_state': best_prior_state,
+            'program_generator_kwargs': pg_kwargs,
+            'program_generator_state': best_pg_state,
+            'execution_engine_kwargs': ee_kwargs,
+            'execution_engine_state': best_ee_state,
+            'baseline_kwargs': baseline_kwargs,
+            'baseline_state': best_baseline_state,
+            'baseline_type': baseline_type,
+            'vocab': vocab
+          }
+          for k, v in stats.items():
+            checkpoint[k] = v
+          print('Saving checkpoint to %s' % args.checkpoint_path)
+          torch.save(checkpoint, args.checkpoint_path)
+          del checkpoint['program_prior_state']
+          del checkpoint['program_generator_state']
+          del checkpoint['execution_engine_state']
+          del checkpoint['baseline_state']
+          with open(args.checkpoint_path + '.json', 'w') as f:
+            json.dump(checkpoint, f)
 
       writer.export_scalars_to_json(os.path.join(log_dir, 'all_scalars.json'))
 
