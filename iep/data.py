@@ -16,17 +16,21 @@ from torch.utils.data.sampler import WeightedRandomSampler
 import iep.programs
 
 
-def _dataset_to_tensor(dset, mask=None):
-  arr = np.asarray(dset, dtype=np.int64)
+def _filter_mask(arr, mask):
   if mask is not None:
     arr = arr[mask]
+  return arr
+
+def _dataset_to_tensor(dset, mask=None):
+  arr = np.asarray(dset, dtype=np.int64)
+  arr = _filter_mask(arr, mask)
   tensor = torch.LongTensor(arr)
   return tensor
 
 
 class ClevrDataset(Dataset):
   def __init__(self, question_h5, feature_h5, vocab, mode='prefix',
-               program_supervision_list=None,
+               program_supervision_list=None, load_features=False,
                image_h5=None, max_samples=None, question_families=None,
                image_idx_start_from=None):
     mode_choices = ['prefix', 'postfix']
@@ -35,6 +39,14 @@ class ClevrDataset(Dataset):
     self.image_h5 = image_h5
     self.vocab = vocab
     self.feature_h5 = feature_h5
+    self.load_features = load_features
+
+    # Load image features into memory.
+    if self.load_features:
+      print('Loading image features into memory.')
+      all_features = np.asarray(self.feature_h5['features'], dtype=np.float32)
+      self.all_features = torch.FloatTensor(all_features)
+
     self.mode = mode
     self.max_samples = max_samples
 
@@ -64,6 +76,8 @@ class ClevrDataset(Dataset):
     else:
       self.all_supervision = torch.Tensor(program_supervision_list).float()
 
+    self.all_supervision = _filter_mask(self.all_supervision, mask)
+
     if program_supervision_list is not None and (
         self.all_questions.size(0) != self.max_samples):
       raise ValueError("Can supply either max_samples or program supervision "
@@ -83,9 +97,11 @@ class ClevrDataset(Dataset):
       image = self.image_h5['images'][image_idx]
       image = torch.FloatTensor(np.asarray(image, dtype=np.float32))
 
-    feats = self.feature_h5['features'][image_idx]
-    feats = torch.FloatTensor(np.asarray(feats, dtype=np.float32))
-
+    if self.load_features:
+      feats = self.all_features[image_idx]
+    else:
+      feats = self.feature_h5['features'][image_idx]
+      feats = torch.FloatTensor(np.asarray(feats, dtype=np.float32))
     program_json = None
     if program_seq is not None:
       program_json_seq = []
@@ -129,6 +145,7 @@ class ClevrDataLoader(DataLoader):
 
     vocab = kwargs.pop('vocab')
     mode = kwargs.pop('mode', 'prefix')
+    load_features = kwargs.pop('load_features', False)
 
     question_families = kwargs.pop('question_families', None)
     max_samples = kwargs.pop('max_samples', None)
@@ -149,6 +166,7 @@ class ClevrDataLoader(DataLoader):
 
       self.dataset = ClevrDataset(question_h5, self.feature_h5, vocab, mode,
                                   program_supervision_list=program_supervision_list,
+                                  load_features=load_features,
                                   image_h5=self.image_h5,
                                   max_samples=max_samples,
                                   question_families=question_families,

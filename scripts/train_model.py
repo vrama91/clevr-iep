@@ -22,6 +22,8 @@ import time
 import numpy as np
 import h5py
 
+from tensorboardX import SummaryWriter
+
 import iep.utils as utils
 import iep.preprocess
 from iep.data import ClevrDataLoader
@@ -44,6 +46,7 @@ parser.add_argument('--val_question_h5', default=_TRAIN_DATA_DIR + 'val_question
 parser.add_argument('--val_features_h5', default=_TRAIN_DATA_DIR + 'val_features.h5')
 parser.add_argument('--feature_dim', default='1024,14,14')
 parser.add_argument('--vocab_json', default=_TRAIN_DATA_DIR + 'vocab.json')
+parser.add_argument('--load_train_features_memory', default=0)
 
 parser.add_argument('--loader_num_workers', type=int, default=1)
 parser.add_argument('--use_local_copies', default=0, type=int)
@@ -149,11 +152,13 @@ def main(args):
     'num_workers': args.loader_num_workers,
     'program_supervision_json': args.program_supervision_json,
     'mixing_factor_supervision': args.mixing_factor_supervision,
+    'load_features': args.load_train_features_memory,
   }
   val_loader_kwargs = {
     'question_h5': args.val_question_h5,
     'feature_h5': args.val_features_h5,
     'vocab': vocab,
+    'shuffle': False,
     'batch_size': args.batch_size,
     'question_families': question_families,
     'max_samples': args.num_val_samples,
@@ -172,6 +177,10 @@ def main(args):
 
 
 def train_loop(args, train_loader, val_loader):
+  log_dir = '/'.join(args.checkpoint_path.split('/')[:-1])
+  print('Using log directory', log_dir)
+  writer = SummaryWriter(log_dir=log_dir)
+
   vocab = utils.load_vocab(args.vocab_json)
   program_generator, pg_kwargs, pg_optimizer = None, None, None
   execution_engine, ee_kwargs, ee_optimizer = None, None, None
@@ -213,7 +222,7 @@ def train_loop(args, train_loader, val_loader):
   stats = {
     'train_losses': [], 'train_rewards': [], 'train_losses_ts': [],
     'train_accs': [], 'val_accs': [], 'val_accs_ts': [],
-    'best_val_acc': -1, 'model_t': 0,
+    'best_val_acc': -100000, 'model_t': 0,
   }
   t, epoch, reward_moving_average = 0, 0, 0
 
@@ -225,9 +234,10 @@ def train_loop(args, train_loader, val_loader):
   while t < args.num_iterations:
     epoch += 1
     print('Starting epoch %d' % epoch)
-    stime = time.time()
     for batch in train_loader:
       t += 1
+      if t == 1:
+        stime = time.time()
       questions, _, feats, answers, programs, _, supervision_batch = batch
       questions_var = Variable(questions.cuda())
       feats_var = Variable(feats.cuda())
@@ -291,24 +301,29 @@ def train_loop(args, train_loader, val_loader):
           program_generator.reinforce_backward(centered_reward.cuda())
           pg_optimizer.step()
 
-      if t % args.record_loss_every == 0:
-        print('Step: %d, loss: %f (%f Sec.)' % (
-                t, float(loss.data[0]), (time.time()-stime)/t))
+
+      writer.add_scalar('data/train_loss', loss.data[0], t)
+      writer.add_scalar('runtime/steps_per_sec', (time.time()-stime)/t-1)
+
+      if t % args.record_loss_every == 0 and t != 1:
+        print('Step: %d, loss: %f (%f Steps/Sec.)' % (
+                t, float(loss.data[0]), (time.time()-stime)/t-1))
         stats['train_losses'].append(loss.data[0])
         stats['train_losses_ts'].append(t)
         if reward is not None:
           stats['train_rewards'].append(reward)
 
       if t % args.checkpoint_every == 0:
-        print('Checking training accuracy ... ')
-        train_acc = check_accuracy(args, program_prior, program_generator, execution_engine,
-                                   baseline_model, train_loader)
-        print('train accuracy is', train_acc)
+        # print('Checking training accuracy ... ')
+        # train_acc = check_accuracy(args, program_prior, program_generator, execution_engine,
+        #                           baseline_model, train_loader)
+        # print('train accuracy is', train_acc)
         print('Checking validation accuracy ...')
         val_acc = check_accuracy(args, program_prior, program_generator, execution_engine,
                                  baseline_model, val_loader)
+        writer.add_scalar('data/val_accuracy', val_acc, t)
         print('val accuracy is ', val_acc)
-        stats['train_accs'].append(train_acc)
+        # stats['train_accs'].append(train_acc)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
 
@@ -344,7 +359,10 @@ def train_loop(args, train_loader, val_loader):
         with open(args.checkpoint_path + '.json', 'w') as f:
           json.dump(checkpoint, f)
 
+      writer.export_scalars_to_json(os.path.join(log_dir, 'all_scalars.json'))
+
       if t == args.num_iterations:
+        writer.close()
         break
 
 
@@ -553,5 +571,7 @@ def check_accuracy(args, program_prior, program_generator, execution_engine, bas
 
 
 if __name__ == '__main__':
+  _HOSTNAME = os.environ.get("HOSTNAME")
+  print("Running experiment on %s." % (_HOSTNAME))
   args = parser.parse_args()
   main(args)
