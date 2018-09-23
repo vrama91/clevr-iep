@@ -18,7 +18,7 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from collections import namedtuple
 
-from iep.misc import sparse_softmax_cross_entropy_with_logits
+from iep.utils import sparse_softmax_cross_entropy_with_logits
 
 dims_collection = namedtuple('DimsCollection', ['V_out', 'D', 'H', 'L', 'N', 'T_out'])
 

@@ -8,86 +8,35 @@
 
 import json
 import torch
+from torch.nn.functional import log_softmax
 
+def sparse_softmax_cross_entropy_with_logits(
+    logits=None, labels=None, reduction=None):
+  """Compute cross entropy loss, given logits."""
+  if logits.dim() - labels.dim() != 1:
+    raise ValueError('Labels expected to be sparse.')
+  if logits.dim() > 3:
+    raise ValueError('Only logits upto 3-D supported')
 
-from iep.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel, SeqModel
+  if logits.dim() == 3:
+    size_0, size_1, _ = logits.size()
+    assert labels.size(0) == size_0 and labels.size(1) == size_1
+    logits_flat = logits.contiguous().view(logits.size(0)*logits.size(1), -1)
+    labels_flat = labels.contiguous().view(-1)
+  else:
+    logits_flat = logits
+    labels_flat = labels
+
+  log_probs = log_softmax(logits_flat, dim=1)
+
+  negative_log_likelihood = -1 * torch.gather(
+      log_probs, 1, labels_flat.unsqueeze(1)) 
+
+  if logits.dim() == 3:
+    negative_log_likelihood = negative_log_likelihood.view(size_0, size_1)
+
+  return negative_log_likelihood
 
 
 def invert_dict(d):
   return {v: k for k, v in d.items()}
-
-
-def load_vocab(path):
-  with open(path, 'r') as f:
-    vocab = json.load(f)
-    vocab['question_idx_to_token'] = invert_dict(vocab['question_token_to_idx'])
-    vocab['program_idx_to_token'] = invert_dict(vocab['program_token_to_idx'])
-    vocab['answer_idx_to_token'] = invert_dict(vocab['answer_token_to_idx'])
-  # Sanity check: make sure <NULL>, <START>, and <END> are consistent
-  assert vocab['question_token_to_idx']['<NULL>'] == 0
-  assert vocab['question_token_to_idx']['<START>'] == 1
-  assert vocab['question_token_to_idx']['<END>'] == 2
-  assert vocab['program_token_to_idx']['<NULL>'] == 0
-  assert vocab['program_token_to_idx']['<START>'] == 1
-  assert vocab['program_token_to_idx']['<END>'] == 2
-  return vocab
-
-
-def load_cpu(path):
-  """
-  Loads a torch checkpoint, remapping all Tensors to CPU
-  """
-  print('Loading checkpoint from file: %s' % (path))
-  return torch.load(path, map_location=lambda storage, loc: storage)
-
-
-def load_program_prior(path):
-  checkpoint = load_cpu(path)
-  kwargs = checkpoint['program_prior_kwargs']
-  state = checkpoint['program_prior_state']
-  model = SeqModel(**kwargs)
-  model.load_state_dict(state)
-  return model, kwargs
-
-
-def load_question_reconstructor(path):
-  checkpoint = load_cpu(path)
-  kwargs = checkpoint['question_reconstructor_kwargs']
-  state = checkpoint['question_reconstructor_state']
-  model = Seq2Seq(**kwargs)
-  model.load_state_dict(state)
-  return model, kwargs
-
-def load_program_generator(path):
-  checkpoint = load_cpu(path)
-  kwargs = checkpoint['program_generator_kwargs']
-  state = checkpoint['program_generator_state']
-  model = Seq2Seq(**kwargs)
-  model.load_state_dict(state)
-  return model, kwargs
-
-
-def load_execution_engine(path, verbose=True):
-  checkpoint = load_cpu(path)
-  kwargs = checkpoint['execution_engine_kwargs']
-  state = checkpoint['execution_engine_state']
-  kwargs['verbose'] = verbose
-  model = ModuleNet(**kwargs)
-  cur_state = model.state_dict()
-  model.load_state_dict(state)
-  return model, kwargs
-
-def load_baseline(path):
-  model_cls_dict = {
-    'LSTM': LstmModel,
-    'CNN+LSTM': CnnLstmModel,
-    'CNN+LSTM+SA': CnnLstmSaModel,
-  }
-  checkpoint = load_cpu(path)
-  baseline_type = checkpoint['baseline_type']
-  kwargs = checkpoint['baseline_kwargs']
-  state = checkpoint['baseline_state']
-
-  model = model_cls_dict[baseline_type](**kwargs)
-  model.load_state_dict(state)
-  return model, kwargs

@@ -14,7 +14,7 @@ from torch.autograd import Variable
 from torch.distributions import Categorical
 
 from iep.embedding import expand_embedding_vocab
-from iep.misc import sparse_softmax_cross_entropy_with_logits
+from iep.utils import sparse_softmax_cross_entropy_with_logits
 
 class Seq2Seq(nn.Module):
   def __init__(self,

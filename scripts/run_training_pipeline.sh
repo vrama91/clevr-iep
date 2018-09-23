@@ -9,7 +9,7 @@
 source ~/venv/iep/bin/activate
 
 #PRIOR_CHECKPOINTS="/coc/scratch/rvedantam3/runs/pytorch_discovery/prior_local"
-PRIOR_CHECKPOINTS="/coc/scratch/rvedantam3/runs/pytorch_discovery/prior"
+#PRIOR_CHECKPOINTS="/coc/scratch/rvedantam3/runs/pytorch_discovery/prior"
 
 if [ ! -e ${PRIOR_CHECKPOINTS} ]; then
 	mkdir ${PRIOR_CHECKPOINTS}
@@ -49,16 +49,15 @@ do
 	fi
 
   CMD_STRING="python scripts/train_model.py \
-  	--model_type PG \
-		--model_version discovery \
-		--program_prior_start_from ${PRIOR_CHECKPOINTS}/lr_0.001/prior.pth \
-    --program_supervision_npy /srv/share/datasets/clevr/CLEVR_v1.0/clevr-iep-data/semi_supervised_train_1000.npy \
-  	--num_iterations 20000 \
-		--mixing_factor_supervision 0.5 \
-  	--checkpoint_every 1000 \
+  	--model_type Prior \
+    --num_train_samples 100 \
+	--model_version discovery \
+  	--num_iterations 2000 \
+	--mixing_factor_supervision 0.5 \
+  	--checkpoint_every 100 \
   	--learning_rate ${lr} \
   	--checkpoint_path ${ROOT_DIR}/prior.pth"
 	exec ${CMD_STRING}
   #source utils/invoke_slurm.sh "Y" "${CMD_STRING}" "${JOB_STRING}" "${TRAINVAL_STRING}" "${RUN_TRAIN_DIR}"
 done
-#--num_train_samples 1000 \
+    #--program_supervision_npy /srv/share/datasets/clevr/CLEVR_v1.0/clevr-iep-data/semi_supervised_train_500.npy \

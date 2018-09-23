@@ -19,7 +19,7 @@ import numpy as np
 import h5py
 from scipy.misc import imread, imresize
 
-import iep.utils as utils
+import iep.misc as misc 
 import iep.programs
 from iep.data import ClevrDataset, ClevrDataLoader
 from iep.preprocess import tokenize, encode
@@ -64,17 +64,17 @@ def main(args):
   model = None
   if args.baseline_model is not None:
     print('Loading baseline model from ', args.baseline_model)
-    model, _ = utils.load_baseline(args.baseline_model)
+    model, _ = misc.load_baseline(args.baseline_model)
     if args.vocab_json is not None:
-      new_vocab = utils.load_vocab(args.vocab_json)
+      new_vocab = misc.load_vocab(args.vocab_json)
       model.rnn.expand_vocab(new_vocab['question_token_to_idx'])
   elif args.program_generator is not None and args.execution_engine is not None:
     print('Loading program generator from ', args.program_generator)
-    program_generator, _ = utils.load_program_generator(args.program_generator)
+    program_generator, _ = misc.load_program_generator(args.program_generator)
     print('Loading execution engine from ', args.execution_engine)
-    execution_engine, _ = utils.load_execution_engine(args.execution_engine, verbose=False)
+    execution_engine, _ = misc.load_execution_engine(args.execution_engine, verbose=False)
     if args.vocab_json is not None:
-      new_vocab = utils.load_vocab(args.vocab_json)
+      new_vocab = misc.load_vocab(args.vocab_json)
       program_generator.expand_encoder_vocab(new_vocab['question_token_to_idx'])
     model = (program_generator, execution_engine)
   else:
@@ -108,7 +108,7 @@ def load_vocab(args):
     path = args.program_generator
   elif args.execution_engine is not None:
     path = args.execution_engine
-  return utils.load_cpu(path)['vocab']
+  return misc.load_cpu(path)['vocab']
 
 
 def run_single_example(args, model):

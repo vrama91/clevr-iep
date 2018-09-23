@@ -24,10 +24,10 @@ import time
 import numpy as np
 import h5py
 
-from tensorboardX import SummaryWriter
-from scripts.eval_model import check_accuracy
 import iep.utils as utils
 import iep.preprocess
+
+from tensorboardX import SummaryWriter
 from iep.data import ClevrDataLoader
 from iep.models import ModuleNet
 from iep.models import Seq2Seq
@@ -35,6 +35,17 @@ from iep.models import LstmModel
 from iep.models import CnnLstmModel
 from iep.models import CnnLstmSaModel
 from iep.models.seq import SeqModel
+
+from iep.misc import check_accuracy
+from iep.misc import apply_supervision_on_loss
+from iep.misc import get_baseline_model
+from iep.misc import get_execution_engine
+from iep.misc import get_program_generator
+from iep.misc import get_program_prior
+from iep.misc import get_question_reconstructor
+from iep.misc import get_state
+from iep.misc import set_mode
+from iep.misc import load_vocab
 
 parser = argparse.ArgumentParser()
 
@@ -146,7 +157,7 @@ def main(args):
     num = random.randint(1, 1000000)
     args.checkpoint_path = '%s_%06d%s' % (name, num, ext)
 
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
 
   if args.use_local_copies == 1:
     shutil.copy(args.train_question_h5, '/tmp/train_questions.h5')
@@ -192,6 +203,9 @@ def main(args):
        ClevrDataLoader(**val_loader_kwargs) as val_loader:
     train_loop(args, train_loader, val_loader)
 
+  # Write code here that will evaluate in a loop, waiting for
+  # a new checkpoint to appear.
+
   if args.use_local_copies == 1 and args.cleanup_local_copies == 1:
     os.remove('/tmp/train_questions.h5')
     os.remove('/tmp/train_features.h5')
@@ -204,7 +218,7 @@ def train_loop(args, train_loader, val_loader):
   print('Using log directory', log_dir)
   writer = SummaryWriter(log_dir=log_dir)
 
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
 
   program_prior, prior_kwargs, prior_optimizer = None, None, None
   question_reconstructor, qr_kwargs, qr_optimizer = None, None, None

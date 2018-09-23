@@ -9,35 +9,21 @@
 """
 Some misc functions.
 """
+import json
+import numpy as np
 import torch
-from torch.nn.functional import log_softmax
 
-def sparse_softmax_cross_entropy_with_logits(
-    logits=None, labels=None, reduction=None):
-  """Compute cross entropy loss, given logits."""
-  if logits.dim() - labels.dim() != 1:
-    raise ValueError('Labels expected to be sparse.')
-  if logits.dim() > 3:
-    raise ValueError('Only logits upto 3-D supported')
+import iep.utils as utils
+from iep.models import ModuleNet
+from iep.models import Seq2Seq
+from iep.models import LstmModel
+from iep.models import CnnLstmModel
+from iep.models import CnnLstmSaModel
+from iep.models.seq import SeqModel
+import iep.preprocess
 
-  if logits.dim() == 3:
-    size_0, size_1, _ = logits.size()
-    assert labels.size(0) == size_0 and labels.size(1) == size_1
-    logits_flat = logits.contiguous().view(logits.size(0)*logits.size(1), -1)
-    labels_flat = labels.contiguous().view(-1)
-  else:
-    logits_flat = logits
-    labels_flat = labels
+from torch.autograd import Variable
 
-  log_probs = log_softmax(logits_flat, dim=1)
-
-  negative_log_likelihood = -1 * torch.gather(
-      log_probs, 1, labels_flat.unsqueeze(1))
-
-  if logits.dim() == 3:
-    negative_log_likelihood = negative_log_likelihood.view(size_0, size_1)
-
-  return negative_log_likelihood
 
 def parse_int_list(s):
   return tuple(int(n) for n in s.split(','))
@@ -67,9 +53,9 @@ def get_state(m):
 
 
 def get_program_prior(args):
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
   if args.program_prior_start_from is not None:
-    prior, kwargs = utils.load_program_prior(
+    prior, kwargs = load_program_prior(
       args.program_prior_start_from
     )
   else:
@@ -87,9 +73,9 @@ def get_program_prior(args):
 
 
 def get_question_reconstructor(args):
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
   if args.program_generator_start_from is not None:
-    qr, kwargs = utils.load_question_reconstructor(
+    qr, kwargs = load_question_reconstructor(
         args.question_reconstructor_load_from)
   else:
     kwargs = {
@@ -108,9 +94,9 @@ def get_question_reconstructor(args):
 
 
 def get_program_generator(args):
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
   if args.program_generator_start_from is not None:
-    pg, kwargs = utils.load_program_generator(args.program_generator_start_from)
+    pg, kwargs = load_program_generator(args.program_generator_start_from)
     cur_vocab_size = pg.encoder_embed.weight.size(0)
     if cur_vocab_size != len(vocab['question_token_to_idx']):
       print('Expanding vocabulary of program generator')
@@ -133,9 +119,9 @@ def get_program_generator(args):
 
 
 def get_execution_engine(args):
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
   if args.execution_engine_start_from is not None:
-    ee, kwargs = utils.load_execution_engine(args.execution_engine_start_from)
+    ee, kwargs = load_execution_engine(args.execution_engine_start_from)
     # TODO: Adjust vocab?
   else:
     kwargs = {
@@ -159,9 +145,9 @@ def get_execution_engine(args):
 
 
 def get_baseline_model(args):
-  vocab = utils.load_vocab(args.vocab_json)
+  vocab = load_vocab(args.vocab_json)
   if args.baseline_start_from is not None:
-    model, kwargs = utils.load_baseline(args.baseline_start_from)
+    model, kwargs = load_baseline(args.baseline_start_from)
   elif args.model_type == 'LSTM':
     kwargs = {
         'vocab': vocab,
@@ -229,3 +215,143 @@ def set_mode(mode, models):
       m.train()
     if mode == 'eval':
       m.eval()
+
+
+def check_accuracy(args, program_prior, question_reconstructor,
+                   program_generator, execution_engine, baseline_model, loader):
+  set_mode('eval', [
+      program_prior, question_reconstructor, program_generator,
+      execution_engine, baseline_model
+  ])
+  num_correct, num_samples = 0, 0
+  for batch in loader:
+    questions, _, feats, answers, programs, _, _ = batch
+
+    questions_var = Variable(questions.cuda(), volatile=True)
+    feats_var = Variable(feats.cuda(), volatile=True)
+    if programs[0] is not None:
+      programs_var = Variable(programs.cuda(), volatile=True)
+
+    scores = None  # Use this for everything but PG and Prior
+    neg_logprob = None
+    if args.model_type == 'Prior':
+      num_correct=None  # Dont use this for the prior.
+      neg_logprob = []
+      for i in range(programs.size(0)):
+        program_neg_logprob = program_prior(
+            Variable(programs[i:i + 1].cuda(), volatile=True))
+        neg_logprob.append(float(program_neg_logprob.data.cpu().numpy()))
+    elif args.model_type == 'PG':
+      vocab = load_vocab(args.vocab_json)
+      for i in range(questions.size(0)):
+        program_pred = program_generator.sample(
+            Variable(questions[i:i + 1].cuda(), volatile=True))
+        program_pred_str = iep.preprocess.decode(program_pred,
+                                                 vocab['program_idx_to_token'])
+        program_str = iep.preprocess.decode(programs[i],
+                                            vocab['program_idx_to_token'])
+        if program_pred_str == program_str:
+          num_correct += 1
+        num_samples += 1
+    elif args.model_type == 'EE':
+      scores = execution_engine(feats_var, programs_var)
+    elif args.model_type == 'PG+EE':
+      programs_pred = program_generator.reinforce_sample(
+          questions_var, argmax=True)
+      scores = execution_engine(feats_var, programs_pred)
+    elif args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
+      scores = baseline_model(questions_var, feats_var)
+
+    if scores is not None:
+      _, preds = scores.data.cpu().max(1)
+      num_correct += (preds == answers).sum()
+      num_samples += preds.size(0)
+
+    if num_samples >= args.num_val_samples:
+      break
+
+  set_mode('train', [
+      program_prior, question_reconstructor, program_generator,
+      execution_engine, baseline_model
+  ])
+  if num_correct is not None:
+    acc = float(num_correct) / num_samples
+  elif neg_logprob is not None:
+    acc = -1 * np.mean(neg_logprob)
+  else:
+    raise RuntimeError
+  return acc
+
+def load_vocab(path):
+  with open(path, 'r') as f:
+    vocab = json.load(f)
+    vocab['question_idx_to_token'] = utils.invert_dict(vocab['question_token_to_idx'])
+    vocab['program_idx_to_token'] = utils.invert_dict(vocab['program_token_to_idx'])
+    vocab['answer_idx_to_token'] = utils.invert_dict(vocab['answer_token_to_idx'])
+  # Sanity check: make sure <NULL>, <START>, and <END> are consistent
+  assert vocab['question_token_to_idx']['<NULL>'] == 0
+  assert vocab['question_token_to_idx']['<START>'] == 1
+  assert vocab['question_token_to_idx']['<END>'] == 2
+  assert vocab['program_token_to_idx']['<NULL>'] == 0
+  assert vocab['program_token_to_idx']['<START>'] == 1
+  assert vocab['program_token_to_idx']['<END>'] == 2
+  return vocab
+
+
+def load_cpu(path):
+  """
+  Loads a torch checkpoint, remapping all Tensors to CPU
+  """
+  print('Loading checkpoint from file: %s' % (path))
+  return torch.load(path, map_location=lambda storage, loc: storage)
+
+
+def load_program_prior(path):
+  checkpoint = load_cpu(path)
+  kwargs = checkpoint['program_prior_kwargs']
+  state = checkpoint['program_prior_state']
+  model = SeqModel(**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
+
+
+def load_question_reconstructor(path):
+  checkpoint = load_cpu(path)
+  kwargs = checkpoint['question_reconstructor_kwargs']
+  state = checkpoint['question_reconstructor_state']
+  model = Seq2Seq(**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
+
+def load_program_generator(path):
+  checkpoint = load_cpu(path)
+  kwargs = checkpoint['program_generator_kwargs']
+  state = checkpoint['program_generator_state']
+  model = Seq2Seq(**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
+
+
+def load_execution_engine(path, verbose=True):
+  checkpoint = load_cpu(path)
+  kwargs = checkpoint['execution_engine_kwargs']
+  state = checkpoint['execution_engine_state']
+  kwargs['verbose'] = verbose
+  model = ModuleNet(**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
+
+def load_baseline(path):
+  model_cls_dict = {
+    'LSTM': LstmModel,
+    'CNN+LSTM': CnnLstmModel,
+    'CNN+LSTM+SA': CnnLstmSaModel,
+  }
+  checkpoint = load_cpu(path)
+  baseline_type = checkpoint['baseline_type']
+  kwargs = checkpoint['baseline_kwargs']
+  state = checkpoint['baseline_state']
+
+  model = model_cls_dict[baseline_type](**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
