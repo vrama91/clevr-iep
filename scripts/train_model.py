@@ -416,16 +416,16 @@ def train_loop(args, train_loader, val_loader):
           stats['train_rewards'].append(reward)
 
       if t % args.checkpoint_every == 0:
-        # print('Checking training accuracy ... ')
-        # train_acc = check_accuracy(args, program_prior, program_generator, execution_engine,
+        #print('Checking training accuracy ... ')
+        #train_acc = check_accuracy(args, program_prior, question_reconstructor, program_generator, execution_engine,
         #                           baseline_model, train_loader)
-        # print('train accuracy is', train_acc)
+        #print('train accuracy is', train_acc)
         print('Checking validation accuracy ...')
         val_acc = check_accuracy(args, program_prior, question_reconstructor, program_generator,
                                  execution_engine, baseline_model, val_loader)
         writer.add_scalar('data/val_accuracy', val_acc, t)
         print('val accuracy is ', val_acc)
-        # stats['train_accs'].append(train_acc)
+        #stats['train_accs'].append(train_acc)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
 
@@ -683,9 +683,9 @@ def check_accuracy(args, program_prior, question_reconstructor,
       programs_var = Variable(programs.cuda(), volatile=True)
 
     scores = None  # Use this for everything but PG and Prior
-    num_correct = None  # Use this for everything but Prior
     neg_logprob = None
     if args.model_type == 'Prior':
+      num_correct=None  # Dont use this for the prior.
       neg_logprob = []
       for i in range(programs.size(0)):
         program_neg_logprob = program_prior(
