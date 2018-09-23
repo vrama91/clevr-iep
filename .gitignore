@@ -3,3 +3,6 @@ data/
 .env/
 *.swp
 .ipynb_checkpoints/
+.vscode/settings.json
+runs/*
+scripts/.run_training_pipeline.sh.swo

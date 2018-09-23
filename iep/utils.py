@@ -10,7 +10,7 @@ import json
 import torch
 
 
-from iep.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel
+from iep.models import ModuleNet, Seq2Seq, LstmModel, CnnLstmModel, CnnLstmSaModel, SeqModel
 
 
 def invert_dict(d):
@@ -37,7 +37,26 @@ def load_cpu(path):
   """
   Loads a torch checkpoint, remapping all Tensors to CPU
   """
+  print('Loading checkpoint from file: %s' % (path))
   return torch.load(path, map_location=lambda storage, loc: storage)
+
+
+def load_program_prior(path):
+  checkpoint = load_cpu(path)
+  kwargs = checkpoint['program_prior_kwargs']
+  state = checkpoint['program_prior_state']
+  model = SeqModel(**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
+
+
+def load_question_reconstructor(path):
+  checkpoint = load_cpu(path)
+  kwargs = checkpoint['question_reconstructor_kwargs']
+  state = checkpoint['question_reconstructor_state']
+  model = Seq2Seq(**kwargs)
+  model.load_state_dict(state)
+  return model, kwargs
 
 def load_program_generator(path):
   checkpoint = load_cpu(path)

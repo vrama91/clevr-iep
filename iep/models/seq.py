@@ -42,7 +42,6 @@ class SeqModel(nn.Module):
     self.NULL = null_token
     self.START = start_token
     self.END = end_token
-    self.multinomial_outputs = None
 
   def get_dims(self, y):
     V_out = self.decoder_embed.num_embeddings
@@ -70,7 +69,6 @@ class SeqModel(nn.Module):
           idx[i] = t
           break
     idx = idx.type_as(x.data)
-    x[x.data == self.NULL] = replace
     return x, Variable(idx)
 
   def decoder(self, y, h0=None, c0=None):
@@ -106,8 +104,6 @@ class SeqModel(nn.Module):
     # the right log-prob of a sequence model would sum logprobs across timesteps
     # and average across mutliple datapoints in the minitbatch.
     logging.warn('Incorrect usage of log-prob in this implementation.')
-
-    self.multinomial_outputs = None
     _dims = self.get_dims(y=y)
     mask = y.data != self.NULL
     y_mask = Variable(torch.Tensor(_dims.N, _dims.T_out).fill_(0).type_as(mask))
@@ -137,7 +133,6 @@ class SeqModel(nn.Module):
     - output_logits: Variable of shape (N, T_out, V_out)
     - y: LongTensor Variable of shape (N, T_out)
     """
-    self.multinomial_outputs = None
     _dims = self.get_dims(y=y)
     mask = y.data != self.NULL
 
@@ -147,7 +142,7 @@ class SeqModel(nn.Module):
 
     loss = sparse_softmax_cross_entropy_with_logits(logits=logits_use,
                                                     labels=y_use)
-    return torch.sum(loss*mask_use, dim=1)
+    return torch.sum(loss*mask_use, dim=1).squeeze()
 
   def forward(self, y, crossent_reduction='mean'):
     # TODO(vrama): Unify the code below between seq2seq.py and seq.py
@@ -159,4 +154,3 @@ class SeqModel(nn.Module):
       return neg_logprobs
     else:
       raise NotImplementedError
-

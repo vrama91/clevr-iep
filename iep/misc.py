@@ -29,7 +29,8 @@ def sparse_softmax_cross_entropy_with_logits(
     logits_flat = logits
     labels_flat = labels
 
-  log_probs = log_softmax(logits_flat)
+  log_probs = log_softmax(logits_flat, dim=1)
+
   negative_log_likelihood = -1 * torch.gather(
       log_probs, 1, labels_flat.unsqueeze(1))
 
