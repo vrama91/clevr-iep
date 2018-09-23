@@ -78,6 +78,8 @@ parser.add_argument('--train_program_generator', default=1, type=int)
 parser.add_argument('--train_execution_engine', default=1, type=int)
 parser.add_argument('--baseline_train_only_rnn', default=0, type=int)
 
+parser.add_argument('--use_gt_programs_for_ee', default=0, type=int)
+
 # Discovery model options.
 parser.add_argument('--discovery_alpha', default=100.0, type=float,)
 parser.add_argument('--discovery_beta', default=0.1, type=float,)
@@ -183,6 +185,7 @@ def main(args):
       'question_families': question_families,
       'max_samples': args.num_val_samples,
       'num_workers': args.loader_num_workers,
+      'load_features': True,
   }
 
   with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
@@ -235,6 +238,12 @@ def train_loop(args, train_loader, val_loader):
       print('Here is the program prior:')
       print(program_prior)
   if args.model_type == 'EE' or args.model_type == 'PG+EE':
+    program_generator, pg_kwargs = get_program_generator(args)
+    pg_optimizer = torch.optim.Adam(
+        program_generator.parameters(), lr=args.learning_rate)
+    print('Here is the program generator:')
+    print(program_generator)
+
     execution_engine, ee_kwargs = get_execution_engine(args)
     ee_optimizer = torch.optim.Adam(
         execution_engine.parameters(), lr=args.learning_rate)
@@ -347,7 +356,7 @@ def train_loop(args, train_loader, val_loader):
           # loss stores what makes sense to look at as an objective for training.
           print_loss = print_loss + torch.mean(nelbo_loss)
           writer.add_scalar('data/nelbo_loss', torch.mean(nelbo_loss).data[0], global_step=t)
-          print('Step: %d, NELBO loss'% (t, torch.mean(nelbo_loss).data[0]))
+          print('Step: %d, NELBO loss: %f'% (t, torch.mean(nelbo_loss).data[0]))
 
           all_discovery_losses.backward()
           qr_optimizer.step()
@@ -363,7 +372,13 @@ def train_loop(args, train_loader, val_loader):
         ee_optimizer.zero_grad()
         # TODO(vrama): make changes where the programs being fed in actually
         # come from inference.
-        scores = execution_engine(feats_var, programs_var)
+
+        if args.use_gt_programs_for_ee == 1:
+          programs_to_use = programs_var
+        elif args.use_gt_programs_for_ee == 0:
+          programs_to_use = program_generator.reinforce_sample(questions_var, argmax=True)
+
+        scores = execution_engine(feats_var, programs_to_use)
         loss = loss_fn(scores, answers_var)
         loss.backward()
         print_loss = loss
@@ -678,7 +693,6 @@ def check_accuracy(args, program_prior, question_reconstructor,
 
     questions_var = Variable(questions.cuda(), volatile=True)
     feats_var = Variable(feats.cuda(), volatile=True)
-    answers_var = Variable(feats.cuda(), volatile=True)
     if programs[0] is not None:
       programs_var = Variable(programs.cuda(), volatile=True)
 

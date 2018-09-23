@@ -1,7 +1,8 @@
 # Run question coding experiments for ICLR'19
 source ~/venv/iep/bin/activate
 
-ROOT_DIR="/coc/scratch/rvedantam3/runs/pytorch_discovery/question_coding"
+#ROOT_DIR="/coc/scratch/rvedantam3/runs/pytorch_discovery/question_coding"
+ROOT_DIR="/coc/scratch/rvedantam3/runs/pytorch_discovery/question_coding_num_workers_3"
 PRIOR_CHECKPOINT="/coc/scratch/rvedantam3/runs/pytorch_discovery/prior/lr_0.001/prior.pth"
 DEBUG=0
 
@@ -45,14 +46,21 @@ else
     if [ ! -e ${RUN_TRAIN_DIR} ]; then
       mkdir ${RUN_TRAIN_DIR}
     fi
+
+    if [ $supervision -lt 1000 ]; then
+      CHECKPOINT_EVERY=100
+    else
+      CHECKPOINT_EVERY=1000
+    fi
   
     CMD_STRING="python scripts/train_model.py \
       --model_type PG\
+      --loader_num_workers 3\
       --model_version $VERSION \
       --program_prior_start_from ${PRIOR_CHECKPOINT} \
       --program_supervision_npy /srv/share/datasets/clevr/CLEVR_v1.0/clevr-iep-data/semi_supervised_train_$supervision.npy \
       --num_iterations 20000 \
-      --checkpoint_every 100 \
+      --checkpoint_every ${CHECKPOINT_EVERY} \
       --mixing_factor_supervision 1.0 \
       --learning_rate 5e-4\
       --checkpoint_path ${RUN_TRAIN_DIR}/question_coding.pth"
@@ -81,16 +89,23 @@ else
     if [ ! -e ${RUN_TRAIN_DIR} ]; then
       mkdir ${RUN_TRAIN_DIR}
     fi
+
+    if [ $supervision -lt 1000 ]; then
+      CHECKPOINT_EVERY=100
+    else
+      CHECKPOINT_EVERY=1000
+    fi
   
     CMD_STRING="python scripts/train_model.py \
       --model_type PG\
+      --loader_num_workers 3\
       --model_version $VERSION \
       --program_prior_start_from ${PRIOR_CHECKPOINT} \
       --discovery_alpha ${SSL_ALPHA} \
       --discovery_beta ${KL_BETA} \
       --program_supervision_npy /srv/share/datasets/clevr/CLEVR_v1.0/clevr-iep-data/semi_supervised_train_$supervision.npy \
       --num_iterations 20000 \
-      --checkpoint_every 1000 \
+      --checkpoint_every ${CHECKPOINT_EVERY} \
       --mixing_factor_supervision ${MIXING_FACTOR} \
       --learning_rate 5e-4\
       --checkpoint_path ${RUN_TRAIN_DIR}/question_coding.pth"

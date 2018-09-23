@@ -6,7 +6,7 @@ sbatch<<EOT
 #SBATCH --output=${4}/${3}.log
 #SBATCH --nodes=1
 #SBATCH --gres=gpu:1
-#SBATCH --exclude=t1000,jarvis,vicki,jill
+#SBATCH --exclude=hal
 
 echo "Starting job "${2}
 echo "Running command" ${1}
