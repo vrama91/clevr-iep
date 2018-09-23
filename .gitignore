@@ -1,9 +1,12 @@
 data/
 *.pyc
 .env/
-*.swp
 .ipynb_checkpoints/
 .vscode/settings.json
 runs/*
 scripts/.run_training_pipeline.sh.swo
 *.out
+._.DS_Store
+scripts/._run_question_coding.sh
+*.swp
+*.swo
