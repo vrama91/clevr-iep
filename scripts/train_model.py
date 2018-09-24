@@ -63,9 +63,10 @@ parser.add_argument(
 parser.add_argument('--feature_dim', default='1024,14,14')
 parser.add_argument('--vocab_json', default=_TRAIN_DATA_DIR + 'vocab.json')
 parser.add_argument(
-    '--load_train_features_memory', default=False, action='store_true')
+    '--dont_load_train_features_memory', default=False, action='store_true')
 
 parser.add_argument('--loader_num_workers', type=int, default=1)
+parser.add_argument('--evaluate_during_train', action='store_true', default=False)
 parser.add_argument('--use_local_copies', default=0, type=int)
 parser.add_argument('--cleanup_local_copies', default=1, type=int)
 
@@ -145,17 +146,17 @@ parser.add_argument('--reward_decay', default=0.9, type=float)
 parser.add_argument('--elbo_reward_decay', default=0.99, type=float)
 
 # Output options
-parser.add_argument('--checkpoint_path', default='data/checkpoint.pt')
-parser.add_argument('--randomize_checkpoint_path', type=int, default=0)
+parser.add_argument('--checkpoint_dir', default='data/')
+parser.add_argument('--randomize_checkpoint_dir', type=int, default=0)
 parser.add_argument('--record_loss_every', type=int, default=1)
 parser.add_argument('--checkpoint_every', default=10000, type=int)
 
 
 def main(args):
-  if args.randomize_checkpoint_path == 1:
-    name, ext = os.path.splitext(args.checkpoint_path)
+  if args.randomize_checkpoint_dir == 1:
+    name, ext = os.path.splitext(args.checkpoint_dir)
     num = random.randint(1, 1000000)
-    args.checkpoint_path = '%s_%06d%s' % (name, num, ext)
+    args.checkpoint_dir = '%s_%06d%s' % (name, num, ext)
 
   vocab = load_vocab(args.vocab_json)
 
@@ -185,7 +186,7 @@ def main(args):
       'num_workers': args.loader_num_workers,
       'program_supervision_npy': args.program_supervision_npy,
       'mixing_factor_supervision': args.mixing_factor_supervision,
-      'load_features': args.load_train_features_memory,
+      'dont_load_features': args.dont_load_train_features_memory,
   }
   val_loader_kwargs = {
       'question_h5': args.val_question_h5,
@@ -196,7 +197,6 @@ def main(args):
       'question_families': question_families,
       'max_samples': args.num_val_samples,
       'num_workers': args.loader_num_workers,
-      'load_features': True,
   }
 
   with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
@@ -214,7 +214,7 @@ def main(args):
 
 
 def train_loop(args, train_loader, val_loader):
-  log_dir = '/'.join(args.checkpoint_path.split('/')[:-1])
+  log_dir = '/'.join(args.checkpoint_dir.split('/')[:-1])
   print('Using log directory', log_dir)
   writer = SummaryWriter(log_dir=log_dir)
 
@@ -302,7 +302,10 @@ def train_loop(args, train_loader, val_loader):
         stime = time.time()
       questions, _, feats, answers, programs, _, supervision = batch
       questions_var = Variable(questions.cuda())
-      feats_var = Variable(feats.cuda())
+
+      if feats[0] is not None:
+        feats_var = Variable(feats.cuda())
+
       answers_var = Variable(answers.cuda())
       supervision_var = Variable(supervision.cuda())
 
@@ -431,7 +434,8 @@ def train_loop(args, train_loader, val_loader):
         print_loss = loss
 
       writer.add_scalar('data/train_loss', print_loss.data[0], t)
-      writer.add_scalar('runtime/steps_per_sec', (time.time() - stime) / t - 1)
+      if t != 1:
+        writer.add_scalar('runtime/sec_per_step', (time.time() - stime)/(t-1), t)
       writer.add_scalar('data/supervision',
                         float(torch.sum(supervision_var).data[0]) / args.batch_size, t)
 
@@ -444,7 +448,7 @@ def train_loop(args, train_loader, val_loader):
         if reward is not None:
           stats['train_rewards'].append(reward)
 
-      if t % args.checkpoint_every == 0:
+      if args.evaluate_during_train:
         #print('Checking training accuracy ... ')
         #train_acc = check_accuracy(args, program_prior, question_reconstructor, program_generator, execution_engine,
         #                           baseline_model, train_loader)
@@ -457,47 +461,45 @@ def train_loop(args, train_loader, val_loader):
         #stats['train_accs'].append(train_acc)
         stats['val_accs'].append(val_acc)
         stats['val_accs_ts'].append(t)
-
         if val_acc > stats['best_val_acc']:
           stats['best_val_acc'] = val_acc
           stats['model_t'] = t
-          best_prior_state = get_state(program_prior)
-          best_qr_state = get_state(question_reconstructor)
-          best_pg_state = get_state(program_generator)
-          best_ee_state = get_state(execution_engine)
-          best_baseline_state = get_state(baseline_model)
 
-          checkpoint = {
-              'args': args.__dict__,
-              'program_prior_kwargs': prior_kwargs,
-              'program_prior_state': best_prior_state,
-              'question_reconstructor_kwargs': qr_kwargs,
-              'question_reconstructor_state': best_qr_state,
-              'program_generator_kwargs': pg_kwargs,
-              'program_generator_state': best_pg_state,
-              'execution_engine_kwargs': ee_kwargs,
-              'execution_engine_state': best_ee_state,
-              'baseline_kwargs': baseline_kwargs,
-              'baseline_state': best_baseline_state,
-              'baseline_type': baseline_type,
-              'vocab': vocab
-          }
-          for k, v in stats.items():
-            checkpoint[k] = v
-          print('Saving checkpoint to %s' % args.checkpoint_path)
-          torch.save(checkpoint, args.checkpoint_path)
-          del checkpoint['program_prior_state']
-          del checkpoint['question_reconstructor_state']
-          del checkpoint['program_generator_state']
-          del checkpoint['execution_engine_state']
-          del checkpoint['baseline_state']
-          with open(args.checkpoint_path + '.json', 'w') as f:
-            json.dump(checkpoint, f)
+      if t % args.checkpoint_every == 0:
+        prior_state = get_state(program_prior)
+        qr_state = get_state(question_reconstructor)
+        pg_state = get_state(program_generator)
+        ee_state = get_state(execution_engine)
+        baseline_state = get_state(baseline_model)
+        checkpoint = {
+            'args': args.__dict__,
+            'program_prior_kwargs': prior_kwargs,
+            'program_prior_state': prior_state,
+            'question_reconstructor_kwargs': qr_kwargs,
+            'question_reconstructor_state': qr_state,
+            'program_generator_kwargs': pg_kwargs,
+            'program_generator_state': pg_state,
+            'execution_engine_kwargs': ee_kwargs,
+            'execution_engine_state': ee_state,
+            'baseline_kwargs': baseline_kwargs,
+            'baseline_state': baseline_state,
+            'baseline_type': baseline_type,
+            'vocab': vocab
+        }
+        ckpt_path = os.path.join(args.checkpoint_dir, 'model-%d.ckpt' % (t))
+        print('Saving checkpoint to %s' % ckpt_path)
 
-      writer.export_scalars_to_json(os.path.join(log_dir, 'all_scalars.json'))
-      gc.collect()
+        torch.save(checkpoint, ckpt_path)
+        del checkpoint['program_prior_state']
+        del checkpoint['question_reconstructor_state']
+        del checkpoint['program_generator_state']
+        del checkpoint['execution_engine_state']
+        del checkpoint['baseline_state']
+        with open(os.path.join(args.checkpoint_dir, 'metadata-%d.json' % (t)), 'w') as f:
+          json.dump(checkpoint, f)
 
       if t == args.num_iterations:
+        writer.export_scalars_to_json(os.path.join(log_dir, 'all_scalars.json'))
         writer.close()
         break
 

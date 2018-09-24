@@ -36,7 +36,7 @@ python scripts/preprocess_questions.py \
 	  --input_vocab_json ${PROCESSED_FEATURES}/vocab.json
 
 # Create reduced supervision versions of training dataset.
-for num_supervised in 100 500 5000 10000 699989
+for num_supervised in 100 500 1000 2000 5000 10000 699989
 do
   python scripts/create_reduced_supervision.py \
   	--input_questions_h5 ${PROCESSED_FEATURES}/train_questions.h5 \

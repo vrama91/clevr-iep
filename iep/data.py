@@ -30,7 +30,8 @@ def _dataset_to_tensor(dset, mask=None):
 
 class ClevrDataset(Dataset):
   def __init__(self, question_h5, feature_h5, vocab, mode='prefix',
-               program_supervision_list=None, load_features=False,
+               program_supervision_list=None, dont_load_features=False,
+               preload_image_features=False,
                image_h5=None, max_samples=None, question_families=None,
                image_idx_start_from=None):
     mode_choices = ['prefix', 'postfix']
@@ -39,10 +40,18 @@ class ClevrDataset(Dataset):
     self.image_h5 = image_h5
     self.vocab = vocab
     self.feature_h5 = feature_h5
-    self.load_features = load_features
+    self.dont_load_features = dont_load_features
+    self.preload_image_features = preload_image_features
+
+    if self.dont_load_features is True and self.preload_image_features is True:
+      raise ValueError('Both cant be true at once.')
 
     # Load image features into memory.
-    if self.load_features:
+    if self.dont_load_features:
+      print('Skipping loading image features.')
+      self.all_features = None
+    elif self.preload_image_features:
+      raise NotImplementedError
       print('Loading image features into memory.')
       all_features = np.asarray(self.feature_h5['features'], dtype=np.float32)
       self.all_features = torch.FloatTensor(all_features)
@@ -97,8 +106,9 @@ class ClevrDataset(Dataset):
       image = self.image_h5['images'][image_idx]
       image = torch.FloatTensor(np.asarray(image, dtype=np.float32))
 
-    if self.load_features:
-      feats = self.all_features[image_idx]
+    if self.dont_load_features:
+      feats = None
+      #feats = self.all_features[image_idx]
     else:
       feats = self.feature_h5['features'][image_idx]
       feats = torch.FloatTensor(np.asarray(feats, dtype=np.float32))
@@ -145,7 +155,7 @@ class ClevrDataLoader(DataLoader):
 
     vocab = kwargs.pop('vocab')
     mode = kwargs.pop('mode', 'prefix')
-    load_features = kwargs.pop('load_features', False)
+    dont_load_features = kwargs.pop('dont_load_features', False)
 
     question_families = kwargs.pop('question_families', None)
     max_samples = kwargs.pop('max_samples', None)
@@ -166,7 +176,7 @@ class ClevrDataLoader(DataLoader):
 
       self.dataset = ClevrDataset(question_h5, self.feature_h5, vocab, mode,
                                   program_supervision_list=program_supervision_list,
-                                  load_features=load_features,
+                                  dont_load_features=dont_load_features,
                                   image_h5=self.image_h5,
                                   max_samples=max_samples,
                                   question_families=question_families,
