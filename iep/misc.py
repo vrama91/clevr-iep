@@ -76,7 +76,7 @@ def get_question_reconstructor(args):
   vocab = load_vocab(args.vocab_json)
   if args.program_generator_start_from is not None:
     qr, kwargs = load_question_reconstructor(
-        args.question_reconstructor_load_from)
+        args.question_reconstructor_start_from)
   else:
     kwargs = {
         'encoder_vocab_size': len(vocab['program_token_to_idx']),
@@ -224,7 +224,7 @@ def check_accuracy(args, program_prior, question_reconstructor,
       execution_engine, baseline_model
   ])
   num_correct, num_samples = 0, 0
-  for batch in loader:
+  for idx_batch, batch in enumerate(loader):
     questions, _, feats, answers, programs, _, _ = batch
 
     questions_var = Variable(questions.cuda(), volatile=True)
@@ -243,13 +243,16 @@ def check_accuracy(args, program_prior, question_reconstructor,
         neg_logprob.append(float(program_neg_logprob.data.cpu().numpy()))
     elif args.model_type == 'PG':
       vocab = load_vocab(args.vocab_json)
-      for i in range(questions.size(0)):
-        program_pred = program_generator.sample(
-            Variable(questions[i:i + 1].cuda(), volatile=True))
-        program_pred_str = iep.preprocess.decode(program_pred,
+      programs_pred = program_generator.reinforce_sample(questions_var)
+      programs_pred = programs_pred.detach().data.cpu().numpy()
+      for program_idx in range(programs_pred.shape[0]):
+        this_programs = programs_pred[program_idx]
+        this_programs = list(this_programs[this_programs!=0])
+        program_pred_str = iep.preprocess.decode(this_programs,
                                                  vocab['program_idx_to_token'])
-        program_str = iep.preprocess.decode(programs[i],
+        program_str = iep.preprocess.decode(programs[program_idx],
                                             vocab['program_idx_to_token'])
+        assert program_pred_str[0] == '<START>', "First program in the predicted sample must be the start token."
         if program_pred_str == program_str:
           num_correct += 1
         num_samples += 1

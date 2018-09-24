@@ -60,6 +60,15 @@ parser.add_argument(
     '--val_question_h5', default=_TRAIN_DATA_DIR + 'val_questions.h5')
 parser.add_argument(
     '--val_features_h5', default=_TRAIN_DATA_DIR + 'val_features.h5')
+
+# Split to use for evaluation mode of the script.
+parser.add_argument(
+    '--only_evaluation_split',
+    default='',
+    help=
+    'If set to anything other than empty, then skips training and runs '
+    'evaluation on the specified split'
+)
 parser.add_argument('--feature_dim', default='1024,14,14')
 parser.add_argument('--vocab_json', default=_TRAIN_DATA_DIR + 'vocab.json')
 parser.add_argument(
@@ -151,6 +160,10 @@ parser.add_argument('--randomize_checkpoint_dir', type=int, default=0)
 parser.add_argument('--record_loss_every', type=int, default=1)
 parser.add_argument('--checkpoint_every', default=10000, type=int)
 
+def _global_step_from_checkpoint(checkpoint_path):
+  global_step = int(
+    checkpoint_path.split('/')[-1].split('-')[-1].split('.')[0])
+  return global_step
 
 def main(args):
   if args.randomize_checkpoint_dir == 1:
@@ -201,10 +214,20 @@ def main(args):
 
   with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
        ClevrDataLoader(**val_loader_kwargs) as val_loader:
-    train_loop(args, train_loader, val_loader)
-
-  # Write code here that will evaluate in a loop, waiting for
-  # a new checkpoint to appear.
+    if args.only_evaluation_split == 'val':
+      print('Evaluation only, no training')
+      if args.num_val_samples > 10000:
+        raise ValueError('First 10000 samples only for validation')
+      eval_loop(args, val_loader, split_name=args.only_evaluation_split)
+    elif args.only_evaluation_split == 'test':
+      print('Evaluation only, no training')
+      raise NotImplementedError('Test set.only_evaluation not implemented')
+      eval_loop(args, test_loader, split_name=args.only_evaluation_split)
+    elif args.only_evaluation_split == '':
+      print('Training')
+      train_loop(args, train_loader, val_loader)
+    else:
+      raise ValueError('Uncrecognized split %s', args.only_evaluation_split)
 
   if args.use_local_copies == 1 and args.cleanup_local_copies == 1:
     os.remove('/tmp/train_questions.h5')
@@ -213,10 +236,100 @@ def main(args):
     os.remove('/tmp/val_features.h5')
 
 
+def eval_loop(args, loader, split_name='val', checkpoint_prefix='model'):
+  writer = SummaryWriter(log_dir=args.checkpoint_dir)
+  candidate_checkpoints = [
+    os.path.join(args.checkpoint_dir, x) for x in os.listdir(args.checkpoint_dir) if (
+      checkpoint_prefix in x and x.split('.')[-1]=='ckpt')]
+  if len(candidate_checkpoints) == 0:
+    print('No checkpoints found, quitting.')
+    return
+  else:
+    print('Evaluating %d checkpoints' % (len(candidate_checkpoints)))
+
+  vocab = load_vocab(args.vocab_json)
+  print('loader has %d samples' % len(loader.dataset))
+  best_accuracy = -100000
+  best_ckpt = None
+
+  for idx_checkpoint, checkpoint in enumerate(candidate_checkpoints):
+    global_step = _global_step_from_checkpoint(checkpoint)
+
+    # load the checkpoint and evaluate the model.
+    program_prior = None
+    question_reconstructor = None
+    program_generator = None
+    execution_engine = None
+    baseline_model = None
+
+    # Set up model
+    if args.model_type == 'Prior':
+      args.program_prior_start_from = checkpoint
+      program_prior, prior_kwargs = get_program_prior(args)
+      print('Here is the program prior:')
+      print(program_prior)
+    if args.model_type == 'PG' or args.model_type == 'PG+EE':
+      args.program_generator_start_from = checkpoint
+      program_generator, pg_kwargs = get_program_generator(args)
+      print('Here is the program generator:')
+      print(program_generator)
+      if args.model_version == 'discovery':
+        args.question_reconstructor_start_from = checkpoint
+        question_reconstructor, qr_kwargs = get_question_reconstructor(args)
+        print('Here is the question reconstructor:')
+        print(question_reconstructor)
+
+        args.program_prior_start_from = checkpoint
+        program_prior, prior_kwargs = get_program_prior(args)
+        print('Here is the program prior:')
+        print(program_prior)
+    if args.model_type == 'EE' or args.model_type == 'PG+EE':
+      args.program_generator_start_from = checkpoint
+      program_generator, pg_kwargs = get_program_generator(args)
+      print('Here is the program generator:')
+      print(program_generator)
+
+      execution_engine, ee_kwargs = get_execution_engine(args)
+      print('Here is the execution engine:')
+      print(execution_engine)
+    if args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
+      args.baseline_start_from = checkpoint
+      baseline_model, baseline_kwargs = get_baseline_model(args)
+      params = baseline_model.parameters()
+      if args.baseline_train_only_rnn == 1:
+        params = baseline_model.rnn.parameters()
+      print('Here is the baseline model')
+      print(baseline_model)
+      baseline_type = args.model_type
+
+    set_mode('eval', [
+      program_prior, question_reconstructor, program_generator,
+      execution_engine, baseline_model
+    ])
+
+    print('Checking validation accuracy ...')
+    stime = time.time()
+    accuracy = check_accuracy(args, program_prior, question_reconstructor, program_generator,
+                             execution_engine, baseline_model, loader)
+    writer.add_scalar('data/' + split_name + '_accuracy', accuracy, global_step)
+    print('Ckpt[%d/%d] %s accuracy at step %d is %f, eval took %f sec. ' %(idx_checkpoint, len(candidate_checkpoints),
+      split_name, global_step, accuracy, time.time()-stime))
+
+    if accuracy > best_accuracy:
+      print('Found best checkpoint at %d step' %(global_step))
+      best_ckpt = {'checkpoint': checkpoint, 'accuracy': accuracy}
+
+  writer.export_scalars_to_json(os.path.join(args.checkpoint_dir, split_name + 'all_evaluation_scalars.json'))
+  with open(os.path.join(args.checkpoint_dir, split_name + 'best_checkpoint.json'), 'w') as f:
+    print(best_ckpt)
+    json.dump(best_ckpt, f)
+  writer.close()
+
+
 def train_loop(args, train_loader, val_loader):
-  log_dir = '/'.join(args.checkpoint_dir.split('/')[:-1])
-  print('Using log directory', log_dir)
-  writer = SummaryWriter(log_dir=log_dir)
+  #log_dir = '/'.join(args.checkpoint_dir.split('/')[:-1])
+  print('Using log directory', args.checkpoint_dir)
+  writer = SummaryWriter(log_dir=args.checkpoint_dir)
 
   vocab = load_vocab(args.vocab_json)
 
@@ -499,7 +612,7 @@ def train_loop(args, train_loader, val_loader):
           json.dump(checkpoint, f)
 
       if t == args.num_iterations:
-        writer.export_scalars_to_json(os.path.join(log_dir, 'all_scalars.json'))
+        writer.export_scalars_to_json(os.path.join(args.checkpoint_dir, 'all_scalars.json'))
         writer.close()
         break
 
