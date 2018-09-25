@@ -73,6 +73,8 @@ parser.add_argument('--feature_dim', default='1024,14,14')
 parser.add_argument('--vocab_json', default=_TRAIN_DATA_DIR + 'vocab.json')
 parser.add_argument(
     '--dont_load_train_features_memory', default=False, action='store_true')
+parser.add_argument(
+    '--preload_image_features_ram', default=False, action='store_true')
 
 parser.add_argument('--loader_num_workers', type=int, default=1)
 parser.add_argument('--evaluate_during_train', action='store_true', default=False)
@@ -200,6 +202,7 @@ def main(args):
       'program_supervision_npy': args.program_supervision_npy,
       'mixing_factor_supervision': args.mixing_factor_supervision,
       'dont_load_features': args.dont_load_train_features_memory,
+      'preload_image_features': args.preload_image_features_ram,
   }
   val_loader_kwargs = {
       'question_h5': args.val_question_h5,
@@ -210,24 +213,20 @@ def main(args):
       'question_families': question_families,
       'max_samples': args.num_val_samples,
       'num_workers': args.loader_num_workers,
+      'preload_image_features': args.preload_image_features_ram,
   }
 
-  with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
-       ClevrDataLoader(**val_loader_kwargs) as val_loader:
-    if args.only_evaluation_split == 'val':
+  if args.only_evaluation_split != '':
+    with ClevrDataLoader(**val_loader_kwargs) as val_loader:
       print('Evaluation only, no training')
       if args.num_val_samples > 10000:
         raise ValueError('First 10000 samples only for validation')
       eval_loop(args, val_loader, split_name=args.only_evaluation_split)
-    elif args.only_evaluation_split == 'test':
-      print('Evaluation only, no training')
-      raise NotImplementedError('Test set.only_evaluation not implemented')
-      eval_loop(args, test_loader, split_name=args.only_evaluation_split)
-    elif args.only_evaluation_split == '':
+  else:
+    with ClevrDataLoader(**train_loader_kwargs) as train_loader, \
+         ClevrDataLoader(**val_loader_kwargs) as val_loader:
       print('Training')
       train_loop(args, train_loader, val_loader)
-    else:
-      raise ValueError('Uncrecognized split %s', args.only_evaluation_split)
 
   if args.use_local_copies == 1 and args.cleanup_local_copies == 1:
     os.remove('/tmp/train_questions.h5')
@@ -316,6 +315,7 @@ def eval_loop(args, loader, split_name='val', checkpoint_prefix='model'):
       split_name, global_step, accuracy, time.time()-stime))
 
     if accuracy > best_accuracy:
+      best_accuracy = accuracy
       print('Found best checkpoint at %d step' %(global_step))
       best_ckpt = {'checkpoint': checkpoint, 'accuracy': accuracy}
 
@@ -327,7 +327,6 @@ def eval_loop(args, loader, split_name='val', checkpoint_prefix='model'):
 
 
 def train_loop(args, train_loader, val_loader):
-  #log_dir = '/'.join(args.checkpoint_dir.split('/')[:-1])
   print('Using log directory', args.checkpoint_dir)
   writer = SummaryWriter(log_dir=args.checkpoint_dir)
 
@@ -364,7 +363,7 @@ def train_loop(args, train_loader, val_loader):
           program_prior.parameters(), lr=args.learning_rate)
       print('Here is the program prior:')
       print(program_prior)
-  if args.model_type == 'EE' or args.model_type == 'PG+EE':
+  if args.model_type == 'EE': 
     program_generator, pg_kwargs = get_program_generator(args)
     pg_optimizer = torch.optim.Adam(
         program_generator.parameters(), lr=args.learning_rate)
@@ -376,6 +375,29 @@ def train_loop(args, train_loader, val_loader):
         execution_engine.parameters(), lr=args.learning_rate)
     print('Here is the execution engine:')
     print(execution_engine)
+  if args.model_type == 'PG+EE':
+    program_prior, prior_kwargs = get_program_prior(args)
+    print('Here is the program prior:')
+    print(program_prior)
+
+    question_reconstructor, qr_kwargs = get_question_reconstructor(args)
+    qr_optimizer = torch.optim.Adam(
+        question_reconstructor.parameters(), lr=args.learning_rate)
+    print('Here is the question reconstructor:')
+    print(question_reconstructor)
+
+    program_generator, pg_kwargs = get_program_generator(args)
+    pg_optimizer = torch.optim.Adam(
+        program_generator.parameters(), lr=args.learning_rate)
+    print('Here is the program generator:')
+    print(program_generator)
+
+    execution_engine, ee_kwargs = get_execution_engine(args)
+    ee_optimizer = torch.optim.Adam(
+        execution_engine.parameters(), lr=args.learning_rate)
+    print('Here is the execution engine:')
+    print(execution_engine)
+
   if args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
     baseline_model, baseline_kwargs = get_baseline_model(args)
     params = baseline_model.parameters()
@@ -496,20 +518,22 @@ def train_loop(args, train_loader, val_loader):
             set_mode('train', [program_prior])
 
       elif args.model_type == 'EE':
-        # Train execution engine with ground-truth programs
-        # TODO(vrama); Understand why the code here is inconsistent with the
-        # writing the paper.
         ee_optimizer.zero_grad()
-        # TODO(vrama): make changes where the programs being fed in actually
-        # come from inference.
 
         if args.use_gt_programs_for_ee == 1:
           programs_to_use = programs_var
         elif args.use_gt_programs_for_ee == 0:
-          programs_to_use = program_generator.reinforce_sample(questions_var, argmax=True)
+          programs_to_use = program_generator.reinforce_sample(
+            questions_var, argmax=True)
 
         scores = execution_engine(feats_var, programs_to_use)
         loss = loss_fn(scores, answers_var)
+
+        scores_gt = execution_engine(feats_var, programs_var)
+        loss_gt = loss_fn(scores_gt, answers_var)
+
+        print('loss', loss, 'loss_gt', loss_gt)
+
         loss.backward()
         print_loss = loss
         ee_optimizer.step()
@@ -522,6 +546,7 @@ def train_loop(args, train_loader, val_loader):
         print_loss = loss
         baseline_optimizer.step()
       elif args.model_type == 'PG+EE':
+        raise NotImplementedError
         programs_pred = program_generator.reinforce_sample(questions_var)
         scores = execution_engine(feats_var, programs_pred)
 
@@ -561,24 +586,22 @@ def train_loop(args, train_loader, val_loader):
         if reward is not None:
           stats['train_rewards'].append(reward)
 
-      if args.evaluate_during_train:
-        #print('Checking training accuracy ... ')
-        #train_acc = check_accuracy(args, program_prior, question_reconstructor, program_generator, execution_engine,
-        #                           baseline_model, train_loader)
-        #print('train accuracy is', train_acc)
-        print('Checking validation accuracy ...')
-        val_acc = check_accuracy(args, program_prior, question_reconstructor, program_generator,
-                                 execution_engine, baseline_model, val_loader)
-        writer.add_scalar('data/val_accuracy', val_acc, t)
-        print('val accuracy is ', val_acc)
-        #stats['train_accs'].append(train_acc)
-        stats['val_accs'].append(val_acc)
-        stats['val_accs_ts'].append(t)
-        if val_acc > stats['best_val_acc']:
-          stats['best_val_acc'] = val_acc
-          stats['model_t'] = t
-
       if t % args.checkpoint_every == 0:
+        if args.model_type == 'EE' and program_generator is None:
+          raise ValueError
+
+        if args.evaluate_during_train:
+          print('Checking validation accuracy ...')
+          val_acc = check_accuracy(args, program_prior, question_reconstructor, program_generator,
+                                   execution_engine, baseline_model, val_loader)
+          writer.add_scalar('data/val_accuracy', val_acc, t)
+          print('val accuracy is ', val_acc)
+          stats['val_accs'].append(val_acc)
+          stats['val_accs_ts'].append(t)
+          if val_acc > stats['best_val_acc']:
+            stats['best_val_acc'] = val_acc
+            stats['model_t'] = t
+
         prior_state = get_state(program_prior)
         qr_state = get_state(question_reconstructor)
         pg_state = get_state(program_generator)

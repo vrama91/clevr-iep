@@ -35,22 +35,22 @@ fi
 while [ ! -e ${SCHEDULED_FILE} ]; 
 do
 	# Wait for GPUs
-	while [ `gpus_free` -lt $GPU_THRESHOLD ]; 
-	do
-		echo "Sleeping for $SLEEP"
-		date | awk '{print "Waiting for GPUs: " $1" "$2" "$3" "$4}'
-		sleep ${SLEEP}
-	done
-	(
-	flock -x 200
-	if ! [ `gpus_free` -lt $GPU_THRESHOLD ]; then
+	#while [ `gpus_free` -lt $GPU_THRESHOLD ]; 
+	#do
+  #		echo "Sleeping for $SLEEP"
+#		date | awk '{print "Waiting for GPUs: " $1" "$2" "$3" "$4}'
+#		sleep ${SLEEP}
+#	done
+#	(
+#	flock -x 200
+#	if ! [ `gpus_free` -lt $GPU_THRESHOLD ]; then
 		launch_jobs
 		# We are using the creation of a file to check that the process was launched
 		# because there does not seem to be an easy way to set variables in this
 		# flock scope and have it reflect in the outer scope.
 		touch ${SCHEDULED_FILE}
-	fi
-	) 200>/var/lock/gpu_process_lock_outer
+#	fi
+#	) 200>/var/lock/gpu_process_lock_outer
 done
 
 rm ${SCHEDULED_FILE}

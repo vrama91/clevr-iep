@@ -10,3 +10,5 @@ scripts/.run_training_pipeline.sh.swo
 scripts/._run_question_coding.sh
 *.swp
 *.swo
+run_eval.sh
+.vscode/.ropeproject/config.py

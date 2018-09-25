@@ -183,19 +183,6 @@ class Seq2Seq(nn.Module):
     # TODO: Handle sampling for minibatch inputs
     # TODO: Beam search?
     raise NotImplementedError
-    self.multinomial_outputs = None
-    assert x.size(0) == 1, "Sampling minibatches not implemented"
-    encoded = self.encoder(x)
-    y = [self.START]
-    h0, c0 = None, None
-    while True:
-      cur_y = Variable(torch.LongTensor([y[-1]]).type_as(x.data).view(1, 1))
-      logprobs, h0, c0 = self.decoder(encoded, cur_y, h0=h0, c0=c0)
-      _, next_y = logprobs.data.max(2)
-      y.append(next_y[0, 0])
-      if len(y) >= max_length or y[-1] == self.END:
-        break
-    return y
 
   def reinforce_sample(self, x, max_length=None, temperature=1.0, argmax=False):
     if max_length == None:

@@ -51,7 +51,6 @@ class ClevrDataset(Dataset):
       print('Skipping loading image features.')
       self.all_features = None
     elif self.preload_image_features:
-      raise NotImplementedError
       print('Loading image features into memory.')
       all_features = np.asarray(self.feature_h5['features'], dtype=np.float32)
       self.all_features = torch.FloatTensor(all_features)
@@ -108,10 +107,12 @@ class ClevrDataset(Dataset):
 
     if self.dont_load_features:
       feats = None
-      #feats = self.all_features[image_idx]
+    elif self.preload_image_features:
+      feats = self.all_features[image_idx]
     else:
       feats = self.feature_h5['features'][image_idx]
       feats = torch.FloatTensor(np.asarray(feats, dtype=np.float32))
+
     program_json = None
     if program_seq is not None:
       program_json_seq = []
@@ -156,6 +157,7 @@ class ClevrDataLoader(DataLoader):
     vocab = kwargs.pop('vocab')
     mode = kwargs.pop('mode', 'prefix')
     dont_load_features = kwargs.pop('dont_load_features', False)
+    preload_image_features = kwargs.pop('preload_image_features', False)
 
     question_families = kwargs.pop('question_families', None)
     max_samples = kwargs.pop('max_samples', None)
@@ -177,6 +179,7 @@ class ClevrDataLoader(DataLoader):
       self.dataset = ClevrDataset(question_h5, self.feature_h5, vocab, mode,
                                   program_supervision_list=program_supervision_list,
                                   dont_load_features=dont_load_features,
+                                  preload_image_features=preload_image_features,
                                   image_h5=self.image_h5,
                                   max_samples=max_samples,
                                   question_families=question_families,

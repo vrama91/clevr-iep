@@ -224,7 +224,7 @@ def check_accuracy(args, program_prior, question_reconstructor,
       execution_engine, baseline_model
   ])
   num_correct, num_samples = 0, 0
-  for idx_batch, batch in enumerate(loader):
+  for batch in loader:
     questions, _, feats, answers, programs, _, _ = batch
 
     questions_var = Variable(questions.cuda(), volatile=True)
@@ -256,12 +256,13 @@ def check_accuracy(args, program_prior, question_reconstructor,
         if program_pred_str == program_str:
           num_correct += 1
         num_samples += 1
-    elif args.model_type == 'EE':
-      scores = execution_engine(feats_var, programs_var)
-    elif args.model_type == 'PG+EE':
-      programs_pred = program_generator.reinforce_sample(
+    elif args.model_type == 'EE' or args.model_type == 'PG+EE':
+      if args.use_gt_programs_for_ee:
+        programs_to_use = programs_var
+      else:
+        programs_to_use = program_generator.reinforce_sample(
           questions_var, argmax=True)
-      scores = execution_engine(feats_var, programs_pred)
+      scores = execution_engine(feats_var, programs_to_use)
     elif args.model_type in ['LSTM', 'CNN+LSTM', 'CNN+LSTM+SA']:
       scores = baseline_model(questions_var, feats_var)
 
